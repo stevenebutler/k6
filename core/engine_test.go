@@ -422,11 +422,11 @@ func TestEngine_processThresholds(t *testing.T) {
 			t.Parallel()
 
 			registry := metrics.NewRegistry()
-			gaugeMetric, err := registry.NewMetric("my_metric", stats.Gauge)
+			gaugeMetric, err := registry.NewMetric("my_metric", metrics.Gauge)
 			require.NoError(t, err)
-			counterMetric, err := registry.NewMetric("used_counter", stats.Counter)
+			counterMetric, err := registry.NewMetric("used_counter", metrics.Counter)
 			require.NoError(t, err)
-			_, err = registry.NewMetric("unused_counter", stats.Counter)
+			_, err = registry.NewMetric("unused_counter", metrics.Counter)
 			require.NoError(t, err)
 
 			thresholds := make(map[string]stats.Thresholds, len(data.ths))

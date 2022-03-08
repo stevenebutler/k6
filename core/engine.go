@@ -66,7 +66,7 @@ type Engine struct {
 	stopOnce sync.Once
 	stopChan chan struct{}
 
-	Samples chan stats.SampleContainer
+	Samples chan metrics.SampleContainer
 
 	// Are thresholds tainted?
 	thresholdsTaintedLock sync.Mutex
@@ -86,7 +86,7 @@ func NewEngine(
 		ExecutionScheduler: ex,
 
 		runtimeOptions: rtOpts,
-		Samples:        make(chan stats.SampleContainer, opts.MetricSamplesBufferSize.Int64),
+		Samples:        make(chan metrics.SampleContainer, opts.MetricSamplesBufferSize.Int64),
 		stopChan:       make(chan struct{}),
 		logger:         logger.WithField("component", "engine"),
 	}
@@ -109,7 +109,16 @@ func NewEngine(
 		e.Stop()
 	})
 
-	return e, nil
+	// TODO: refactor out of here when https://github.com/grafana/k6/issues/1321
+	// lands and there is a better way to enable a metric with tag
+	if e.options.SystemTags.Has(stats.TagExpectedResponse) {
+		_, err := e.getOrInitPotentialSubmetric("http_req_duration{expected_response:true}")
+		if err != nil {
+			return err // shouldn't happen, but ¯\_(ツ)_/¯
+		}
+	}
+
+	return nil
 }
 
 // Init is used to initialize the execution scheduler and all metrics processing
