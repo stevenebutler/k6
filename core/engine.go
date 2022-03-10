@@ -34,7 +34,6 @@ import (
 	"go.k6.io/k6/metrics"
 	"go.k6.io/k6/metrics/engine"
 	"go.k6.io/k6/output"
-	"go.k6.io/k6/stats"
 )
 
 const (
@@ -109,16 +108,7 @@ func NewEngine(
 		e.Stop()
 	})
 
-	// TODO: refactor out of here when https://github.com/grafana/k6/issues/1321
-	// lands and there is a better way to enable a metric with tag
-	if e.options.SystemTags.Has(stats.TagExpectedResponse) {
-		_, err := e.getOrInitPotentialSubmetric("http_req_duration{expected_response:true}")
-		if err != nil {
-			return err // shouldn't happen, but ¯\_(ツ)_/¯
-		}
-	}
-
-	return nil
+	return e, nil
 }
 
 // Init is used to initialize the execution scheduler and all metrics processing
@@ -255,7 +245,7 @@ func (e *Engine) startBackgroundProcesses(
 }
 
 func (e *Engine) processMetrics(globalCtx context.Context, processMetricsAfterRun chan struct{}) {
-	sampleContainers := []stats.SampleContainer{}
+	sampleContainers := []metrics.SampleContainer{}
 
 	defer func() {
 		// Process any remaining metrics in the pipeline, by this point Run()
@@ -287,7 +277,7 @@ func (e *Engine) processMetrics(globalCtx context.Context, processMetricsAfterRu
 			// Make the new container with the same size as the previous
 			// one, assuming that we produce roughly the same amount of
 			// metrics data between ticks...
-			sampleContainers = make([]stats.SampleContainer, 0, cap(sampleContainers))
+			sampleContainers = make([]metrics.SampleContainer, 0, cap(sampleContainers))
 		}
 	}
 	for {

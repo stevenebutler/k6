@@ -56,9 +56,9 @@ func (j JSTest) Foo(arg float64) (bool, error) {
 	allTheFoos := stats.New("foos", metrics.Counter)
 	tags := state.CloneTags()
 	tags["foo"] = "bar"
-	stats.PushIfNotDone(ctx, state.Samples, stats.Sample{
+	metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
 		Time:   time.Now(),
-		Metric: allTheFoos, Tags: stats.IntoSampleTags(&tags),
+		Metric: allTheFoos, Tags: metrics.IntoSampleTags(&tags),
 		Value: arg,
 	})
 

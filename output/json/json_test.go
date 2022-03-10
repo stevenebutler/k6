@@ -35,7 +35,6 @@ import (
 	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/metrics"
 	"go.k6.io/k6/output"
-	"go.k6.io/k6/stats"
 )
 
 func getValidator(t testing.TB, expected []string) func(io.Reader) {
@@ -68,16 +67,16 @@ func generateTestMetricSamples(t testing.TB) ([]metrics.SampleContainer, func(io
 	time2 := time1.Add(10 * time.Second)
 	time3 := time2.Add(10 * time.Second)
 
-	connTags := stats.NewSampleTags(map[string]string{"key": "val"})
+	connTags := metrics.NewSampleTags(map[string]string{"key": "val"})
 
-	samples := []stats.SampleContainer{
-		stats.Sample{Time: time1, Metric: metric1, Value: float64(1), Tags: stats.NewSampleTags(map[string]string{"tag1": "val1"})},
-		stats.Sample{Time: time1, Metric: metric1, Value: float64(2), Tags: stats.NewSampleTags(map[string]string{"tag2": "val2"})},
-		stats.ConnectedSamples{Samples: []stats.Sample{
+	samples := []metrics.SampleContainer{
+		metrics.Sample{Time: time1, Metric: metric1, Value: float64(1), Tags: metrics.NewSampleTags(map[string]string{"tag1": "val1"})},
+		metrics.Sample{Time: time1, Metric: metric1, Value: float64(2), Tags: metrics.NewSampleTags(map[string]string{"tag2": "val2"})},
+		metrics.ConnectedSamples{Samples: []metrics.Sample{
 			{Time: time2, Metric: metric2, Value: float64(3), Tags: connTags},
 			{Time: time2, Metric: metric1, Value: float64(4), Tags: connTags},
 		}, Time: time2, Tags: connTags},
-		stats.Sample{Time: time3, Metric: metric2, Value: float64(5), Tags: stats.NewSampleTags(map[string]string{"tag3": "val3"})},
+		metrics.Sample{Time: time3, Metric: metric2, Value: float64(5), Tags: metrics.NewSampleTags(map[string]string{"tag3": "val3"})},
 	}
 
 	expected := []string{
@@ -188,15 +187,15 @@ func TestJsonOutputFileGzipped(t *testing.T) {
 
 func TestWrapSampleWithSamplePointer(t *testing.T) {
 	t.Parallel()
-	out := wrapSample(stats.Sample{
-		Metric: &stats.Metric{},
+	out := wrapSample(metrics.Sample{
+		Metric: &metrics.Metric{},
 	})
 	assert.NotEqual(t, out, (*sampleEnvelope)(nil))
 }
 
 func TestWrapMetricWithMetricPointer(t *testing.T) {
 	t.Parallel()
-	out := wrapMetric(&stats.Metric{})
+	out := wrapMetric(&metrics.Metric{})
 	assert.NotEqual(t, out, (*metricEnvelope)(nil))
 }
 
@@ -206,7 +205,7 @@ func setThresholds(t *testing.T, out output.Output) {
 	jout, ok := out.(*Output)
 	require.True(t, ok)
 
-	ts := stats.NewThresholds([]string{"rate<0.01", "p(99)<250"})
+	ts := metrics.NewThresholds([]string{"rate<0.01", "p(99)<250"})
 
-	jout.SetThresholds(map[string]stats.Thresholds{"my_metric1": ts})
+	jout.SetThresholds(map[string]metrics.Thresholds{"my_metric1": ts})
 }

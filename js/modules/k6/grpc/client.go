@@ -55,7 +55,7 @@ import (
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modules"
 	"go.k6.io/k6/lib/types"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 	reflectpb "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
 )
 
@@ -482,19 +482,19 @@ func (c *Client) Invoke(
 		tags[k] = v
 	}
 
-	if state.Options.SystemTags.Has(stats.TagURL) {
+	if state.Options.SystemTags.Has(metrics.TagURL) {
 		tags["url"] = fmt.Sprintf("%s%s", c.conn.Target(), method)
 	}
 	parts := strings.Split(method[1:], "/")
-	if state.Options.SystemTags.Has(stats.TagService) {
+	if state.Options.SystemTags.Has(metrics.TagService) {
 		tags["service"] = parts[0]
 	}
-	if state.Options.SystemTags.Has(stats.TagMethod) {
+	if state.Options.SystemTags.Has(metrics.TagMethod) {
 		tags["method"] = parts[1]
 	}
 
 	// Only set the name system tag if the user didn't explicitly set it beforehand
-	if _, ok := tags["name"]; !ok && state.Options.SystemTags.Has(stats.TagName) {
+	if _, ok := tags["name"]; !ok && state.Options.SystemTags.Has(metrics.TagName) {
 		tags["name"] = method
 	}
 
@@ -597,24 +597,24 @@ func (c *Client) HandleRPC(ctx context.Context, stat grpcstats.RPCStats) {
 	tags := getTags(ctx)
 	switch s := stat.(type) {
 	case *grpcstats.OutHeader:
-		if state.Options.SystemTags.Has(stats.TagIP) && s.RemoteAddr != nil {
+		if state.Options.SystemTags.Has(metrics.TagIP) && s.RemoteAddr != nil {
 			if ip, _, err := net.SplitHostPort(s.RemoteAddr.String()); err == nil {
 				tags["ip"] = ip
 			}
 		}
 	case *grpcstats.End:
-		if state.Options.SystemTags.Has(stats.TagStatus) {
+		if state.Options.SystemTags.Has(metrics.TagStatus) {
 			tags["status"] = strconv.Itoa(int(status.Code(s.Error)))
 		}
 
 		mTags := map[string]string(tags)
-		sampleTags := stats.IntoSampleTags(&mTags)
-		stats.PushIfNotDone(ctx, state.Samples, stats.ConnectedSamples{
-			Samples: []stats.Sample{
+		sampleTags := metrics.IntoSampleTags(&mTags)
+		metrics.PushIfNotDone(ctx, state.Samples, metrics.ConnectedSamples{
+			Samples: []metrics.Sample{
 				{
 					Metric: state.BuiltinMetrics.GRPCReqDuration,
 					Tags:   sampleTags,
-					Value:  stats.D(s.EndTime.Sub(s.BeginTime)),
+					Value:  metrics.D(s.EndTime.Sub(s.BeginTime)),
 					Time:   s.EndTime,
 				},
 			},
