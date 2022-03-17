@@ -55,18 +55,19 @@ func getValidator(t testing.TB, expected []string) func(io.Reader) {
 	}
 }
 
-func generateTestMetricSamples(t testing.TB) ([]stats.SampleContainer, func(io.Reader)) {
+func generateTestMetricSamples(t testing.TB) ([]metrics.SampleContainer, func(io.Reader)) {
 	registry := metrics.NewRegistry()
 
-	metric1, err := registry.NewMetric("my_metric1", stats.Gauge)
+	metric1, err := registry.NewMetric("my_metric1", metrics.Gauge)
 	require.NoError(t, err)
 
-	metric2, err := registry.NewMetric("my_metric2", stats.Counter, stats.Data)
+	metric2, err := registry.NewMetric("my_metric2", metrics.Counter, metrics.Data)
 	require.NoError(t, err)
 
 	time1 := time.Date(2021, time.February, 24, 13, 37, 10, 0, time.UTC)
 	time2 := time1.Add(10 * time.Second)
 	time3 := time2.Add(10 * time.Second)
+
 	connTags := stats.NewSampleTags(map[string]string{"key": "val"})
 
 	samples := []stats.SampleContainer{
@@ -78,6 +79,7 @@ func generateTestMetricSamples(t testing.TB) ([]stats.SampleContainer, func(io.R
 		}, Time: time2, Tags: connTags},
 		stats.Sample{Time: time3, Metric: metric2, Value: float64(5), Tags: stats.NewSampleTags(map[string]string{"tag3": "val3"})},
 	}
+
 	expected := []string{
 		`{"type":"Metric","data":{"name":"my_metric1","type":"gauge","contains":"default","tainted":null,"thresholds":["rate<0.01","p(99)<250"],"submetrics":null},"metric":"my_metric1"}`,
 		`{"type":"Point","data":{"time":"2021-02-24T13:37:10Z","value":1,"tags":{"tag1":"val1"}},"metric":"my_metric1"}`,

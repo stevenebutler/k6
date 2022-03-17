@@ -53,7 +53,7 @@ func (j JSTest) Foo(arg float64) (bool, error) {
 
 	ctx := j.vu.Context()
 
-	allTheFoos := stats.New("foos", stats.Counter)
+	allTheFoos := stats.New("foos", metrics.Counter)
 	tags := state.CloneTags()
 	tags["foo"] = "bar"
 	stats.PushIfNotDone(ctx, state.Samples, stats.Sample{
