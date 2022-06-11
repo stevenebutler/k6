@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package js
 
 import (
@@ -33,14 +13,14 @@ import (
 	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gopkg.in/guregu/null.v3"
 
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/loader"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 )
 
 func TestConsoleContext(t *testing.T) {
@@ -83,15 +63,17 @@ func getSimpleRunner(tb testing.TB, filename, data string, opts ...interface{}) 
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	return New(
-		logger,
+		&lib.RuntimeState{
+			Logger:         logger,
+			RuntimeOptions: rtOpts,
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+		},
 		&loader.SourceData{
 			URL:  &url.URL{Path: filename, Scheme: "file"},
 			Data: []byte(data),
 		},
 		map[string]afero.Fs{"file": fs, "https": afero.NewMemMapFs()},
-		rtOpts,
-		builtinMetrics,
-		registry,
 	)
 }
 
@@ -105,7 +87,150 @@ func extractLogger(fl logrus.FieldLogger) *logrus.Logger {
 	return nil
 }
 
-func TestConsole(t *testing.T) {
+func TestConsoleLogWithGojaNativeObject(t *testing.T) {
+	t.Parallel()
+
+	rt := goja.New()
+	rt.SetFieldNameMapper(common.FieldNameMapper{})
+
+	obj := rt.NewObject()
+	err := obj.Set("text", "nativeObject")
+	require.NoError(t, err)
+
+	logger := testutils.NewLogger(t)
+	hook := logtest.NewLocal(logger)
+
+	c := newConsole(logger)
+	c.Log(obj)
+
+	entry := hook.LastEntry()
+	require.NotNil(t, entry, "nothing logged")
+	assert.JSONEq(t, `{"text":"nativeObject"}`, entry.Message)
+}
+
+func TestConsoleLogObjectsWithGoTypes(t *testing.T) {
+	t.Parallel()
+
+	type value struct {
+		Text string
+	}
+
+	tests := []struct {
+		name string
+		in   interface{}
+		exp  string
+	}{
+		{
+			name: "StructLiteral",
+			in: value{
+				Text: "test1",
+			},
+			exp: `{"text":"test1"}`,
+		},
+		{
+			name: "StructPointer",
+			in: &value{
+				Text: "test2",
+			},
+			exp: `{"text":"test2"}`,
+		},
+		{
+			name: "Map",
+			in: map[string]interface{}{
+				"text": "test3",
+			},
+			exp: `{"text":"test3"}`,
+		},
+	}
+
+	expFields := logrus.Fields{"source": "console"}
+	for _, tt := range tests {
+		tt := tt
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			rt := goja.New()
+			rt.SetFieldNameMapper(common.FieldNameMapper{})
+			obj := rt.ToValue(tt.in)
+
+			logger := testutils.NewLogger(t)
+			hook := logtest.NewLocal(logger)
+
+			c := newConsole(logger)
+			c.Log(obj)
+
+			entry := hook.LastEntry()
+			require.NotNil(t, entry, "nothing logged")
+			assert.JSONEq(t, tt.exp, entry.Message)
+			assert.Equal(t, expFields, entry.Data)
+		})
+	}
+}
+
+func TestConsoleLog(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		in       string
+		expected string
+	}{
+		{``, ``},
+		{`""`, ``},
+		{`undefined`, `undefined`},
+		{`null`, `null`},
+
+		{in: `"string"`, expected: "string"},
+		{in: `"string","a","b"`, expected: "string a b"},
+		{in: `"string",1,2`, expected: "string 1 2"},
+
+		{in: `["bar", 1, 2]`, expected: `["bar",1,2]`},
+		{in: `"bar", ["bar", 0x01, 2], 1, 2`, expected: `bar ["bar",1,2] 1 2`},
+
+		{in: `{}`, expected: "{}"},
+		{in: `{foo:"bar"}`, expected: `{"foo":"bar"}`},
+		{in: `["test1", 2]`, expected: `["test1",2]`},
+
+		// TODO: the ideal output for a circular object should be like `{a: [Circular]}`
+		{in: `function() {var a = {foo: {}}; a.foo = a; return a}()`, expected: "[object Object]"},
+	}
+
+	for i, tt := range tests {
+		tt := tt
+		t.Run(fmt.Sprintf("case%d", i), func(t *testing.T) {
+			t.Parallel()
+
+			r, err := getSimpleRunner(t, "/script.js", fmt.Sprintf(
+				`exports.default = function() { console.log(%s); }`, tt.in))
+			require.NoError(t, err)
+
+			samples := make(chan metrics.SampleContainer, 100)
+			initVU, err := r.newVU(1, 1, samples)
+			assert.NoError(t, err)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
+
+			logger := extractLogger(vu.(*ActiveVU).Console.logger)
+
+			logger.Out = ioutil.Discard
+			logger.Level = logrus.DebugLevel
+			hook := logtest.NewLocal(logger)
+
+			err = vu.RunOnce()
+			assert.NoError(t, err)
+
+			entry := hook.LastEntry()
+
+			require.NotNil(t, entry, "nothing logged")
+			assert.Equal(t, tt.expected, entry.Message)
+			assert.Equal(t, logrus.Fields{"source": "console"}, entry.Data)
+		})
+	}
+}
+
+func TestConsoleLevels(t *testing.T) {
 	t.Parallel()
 	levels := map[string]logrus.Level{
 		"log":   logrus.InfoLevel,
@@ -114,21 +239,20 @@ func TestConsole(t *testing.T) {
 		"warn":  logrus.WarnLevel,
 		"error": logrus.ErrorLevel,
 	}
-	argsets := map[string]struct {
-		Message string
-		Data    logrus.Fields
+	argsets := []struct {
+		in  string
+		exp string
 	}{
-		`"string"`:         {Message: "string", Data: logrus.Fields{"source": "console"}},
-		`"string","a","b"`: {Message: "string a b", Data: logrus.Fields{"source": "console"}},
-		`"string",1,2`:     {Message: "string 1 2", Data: logrus.Fields{"source": "console"}},
-		`{}`:               {Message: "[object Object]", Data: logrus.Fields{"source": "console"}},
+		{in: `"string"`, exp: "string"},
+		{in: `{}`, exp: "{}"},
+		{in: `{foo:"bar"}`, exp: `{"foo":"bar"}`},
 	}
 	for name, level := range levels {
 		name, level := name, level
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			for args, result := range argsets {
-				args, result := args, result
+			for _, tt := range argsets {
+				args, result := tt.in, tt.exp
 				t.Run(args, func(t *testing.T) {
 					t.Parallel()
 					r, err := getSimpleRunner(t, "/script.js", fmt.Sprintf(
@@ -137,7 +261,7 @@ func TestConsole(t *testing.T) {
 					))
 					assert.NoError(t, err)
 
-					samples := make(chan stats.SampleContainer, 100)
+					samples := make(chan metrics.SampleContainer, 100)
 					initVU, err := r.newVU(1, 1, samples)
 					assert.NoError(t, err)
 
@@ -155,16 +279,11 @@ func TestConsole(t *testing.T) {
 					assert.NoError(t, err)
 
 					entry := hook.LastEntry()
-					if assert.NotNil(t, entry, "nothing logged") {
-						assert.Equal(t, level, entry.Level)
-						assert.Equal(t, result.Message, entry.Message)
+					require.NotNil(t, entry, "nothing logged")
 
-						data := result.Data
-						if data == nil {
-							data = make(logrus.Fields)
-						}
-						assert.Equal(t, data, entry.Data)
-					}
+					assert.Equal(t, level, entry.Level)
+					assert.Equal(t, result, entry.Message)
+					assert.Equal(t, logrus.Fields{"source": "console"}, entry.Data)
 				})
 			}
 		})
@@ -188,7 +307,7 @@ func TestFileConsole(t *testing.T) {
 			`"string"`:         {Message: "string", Data: logrus.Fields{}},
 			`"string","a","b"`: {Message: "string a b", Data: logrus.Fields{}},
 			`"string",1,2`:     {Message: "string 1 2", Data: logrus.Fields{}},
-			`{}`:               {Message: "[object Object]", Data: logrus.Fields{}},
+			`{}`:               {Message: "{}", Data: logrus.Fields{}},
 		}
 		preExisting = map[string]bool{
 			"log exists":        false,
@@ -239,7 +358,7 @@ func TestFileConsole(t *testing.T) {
 							})
 							assert.NoError(t, err)
 
-							samples := make(chan stats.SampleContainer, 100)
+							samples := make(chan metrics.SampleContainer, 100)
 							initVU, err := r.newVU(1, 1, samples)
 							assert.NoError(t, err)
 

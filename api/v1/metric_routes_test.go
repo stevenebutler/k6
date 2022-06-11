@@ -34,10 +34,9 @@ import (
 	"go.k6.io/k6/core"
 	"go.k6.io/k6/core/local"
 	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/lib/testutils/minirunner"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 )
 
 func TestGetMetrics(t *testing.T) {
@@ -45,17 +44,19 @@ func TestGetMetrics(t *testing.T) {
 
 	logger := logrus.New()
 	logger.SetOutput(testutils.NewTestOutput(t))
-	execScheduler, err := local.NewExecutionScheduler(&minirunner.MiniRunner{}, logger)
-	require.NoError(t, err)
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	engine, err := core.NewEngine(execScheduler, lib.Options{}, lib.RuntimeOptions{}, nil, logger, builtinMetrics)
+	testMetric, err := registry.NewMetric("my_metric", metrics.Trend, metrics.Time)
+	require.NoError(t, err)
+	execScheduler, err := local.NewExecutionScheduler(&minirunner.MiniRunner{}, builtinMetrics, logger)
+	require.NoError(t, err)
+	engine, err := core.NewEngine(execScheduler, lib.Options{}, lib.RuntimeOptions{}, nil, logger, registry)
 	require.NoError(t, err)
 
-	engine.Metrics = map[string]*stats.Metric{
-		"my_metric": stats.New("my_metric", stats.Trend, stats.Time),
+	engine.MetricsEngine.ObservedMetrics = map[string]*metrics.Metric{
+		"my_metric": testMetric,
 	}
-	engine.Metrics["my_metric"].Tainted = null.BoolFrom(true)
+	engine.MetricsEngine.ObservedMetrics["my_metric"].Tainted = null.BoolFrom(true)
 
 	rw := httptest.NewRecorder()
 	NewHandler().ServeHTTP(rw, newRequestWithEngine(engine, "GET", "/v1/metrics", nil))
@@ -79,18 +80,18 @@ func TestGetMetrics(t *testing.T) {
 		var envelop MetricsJSONAPI
 		assert.NoError(t, json.Unmarshal(rw.Body.Bytes(), &envelop))
 
-		metrics := envelop.Data
-		if !assert.Len(t, metrics, 1) {
+		metricsData := envelop.Data
+		if !assert.Len(t, metricsData, 1) {
 			return
 		}
 
-		metric := metrics[0].Attributes
+		metric := metricsData[0].Attributes
 
-		assert.Equal(t, "my_metric", metrics[0].ID)
+		assert.Equal(t, "my_metric", metricsData[0].ID)
 		assert.True(t, metric.Type.Valid)
-		assert.Equal(t, stats.Trend, metric.Type.Type)
+		assert.Equal(t, metrics.Trend, metric.Type.Type)
 		assert.True(t, metric.Contains.Valid)
-		assert.Equal(t, stats.Time, metric.Contains.Type)
+		assert.Equal(t, metrics.Time, metric.Contains.Type)
 		assert.True(t, metric.Tainted.Valid)
 		assert.True(t, metric.Tainted.Bool)
 
@@ -105,17 +106,19 @@ func TestGetMetric(t *testing.T) {
 
 	logger := logrus.New()
 	logger.SetOutput(testutils.NewTestOutput(t))
-	execScheduler, err := local.NewExecutionScheduler(&minirunner.MiniRunner{}, logger)
-	require.NoError(t, err)
 	registry := metrics.NewRegistry()
+	testMetric, err := registry.NewMetric("my_metric", metrics.Trend, metrics.Time)
+	require.NoError(t, err)
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	engine, err := core.NewEngine(execScheduler, lib.Options{}, lib.RuntimeOptions{}, nil, logger, builtinMetrics)
+	execScheduler, err := local.NewExecutionScheduler(&minirunner.MiniRunner{}, builtinMetrics, logger)
+	require.NoError(t, err)
+	engine, err := core.NewEngine(execScheduler, lib.Options{}, lib.RuntimeOptions{}, nil, logger, registry)
 	require.NoError(t, err)
 
-	engine.Metrics = map[string]*stats.Metric{
-		"my_metric": stats.New("my_metric", stats.Trend, stats.Time),
+	engine.MetricsEngine.ObservedMetrics = map[string]*metrics.Metric{
+		"my_metric": testMetric,
 	}
-	engine.Metrics["my_metric"].Tainted = null.BoolFrom(true)
+	engine.MetricsEngine.ObservedMetrics["my_metric"].Tainted = null.BoolFrom(true)
 
 	t.Run("nonexistent", func(t *testing.T) {
 		t.Parallel()
@@ -152,9 +155,9 @@ func TestGetMetric(t *testing.T) {
 
 			assert.Equal(t, "my_metric", envelop.Data.ID)
 			assert.True(t, metric.Type.Valid)
-			assert.Equal(t, stats.Trend, metric.Type.Type)
+			assert.Equal(t, metrics.Trend, metric.Type.Type)
 			assert.True(t, metric.Contains.Valid)
-			assert.Equal(t, stats.Time, metric.Contains.Type)
+			assert.Equal(t, metrics.Time, metric.Contains.Type)
 			assert.True(t, metric.Tainted.Valid)
 			assert.True(t, metric.Tainted.Bool)
 		})

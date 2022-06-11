@@ -24,7 +24,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/spf13/pflag"
 	"gopkg.in/guregu/null.v3"
@@ -32,7 +31,7 @@ import (
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/consts"
 	"go.k6.io/k6/lib/types"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 )
 
 var (
@@ -44,12 +43,8 @@ var (
 func optionFlagSet() *pflag.FlagSet {
 	flags := pflag.NewFlagSet("", 0)
 	flags.SortFlags = false
+
 	flags.Int64P("vus", "u", 1, "number of virtual users")
-
-	// TODO: delete in a few versions
-	flags.Int64P("max", "m", 0, "max available virtual users")
-	_ = flags.MarkDeprecated("max", "the global MaxVUs option is obsolete and doesn't affect the k6 script execution")
-
 	flags.DurationP("duration", "d", 0, "test duration limit")
 	flags.Int64P("iterations", "i", 0, "script total iteration limit (among all VUs)")
 	flags.StringSliceP("stage", "s", nil, "add a `stage`, as `[duration]:[target]`")
@@ -86,7 +81,7 @@ func optionFlagSet() *pflag.FlagSet {
 	// set it to nil here, and add the default in applyDefault() instead.
 	systemTagsCliHelpText := fmt.Sprintf(
 		"only include these system tags in metrics (default %q)",
-		stats.DefaultSystemTagSet.SetString(),
+		metrics.DefaultSystemTagSet.SetString(),
 	)
 	flags.StringSlice("system-tags", nil, systemTagsCliHelpText)
 	flags.StringSlice("tag", nil, "add a `tag` to be applied to all samples, as `[name]=[value]`")
@@ -105,29 +100,24 @@ func optionFlagSet() *pflag.FlagSet {
 //nolint:funlen,gocognit,cyclop // this needs breaking up but probably should wait for croconf
 func getOptions(flags *pflag.FlagSet) (lib.Options, error) {
 	opts := lib.Options{
-		VUs:                   getNullInt64(flags, "vus"),
-		Duration:              getNullDuration(flags, "duration"),
-		Iterations:            getNullInt64(flags, "iterations"),
-		Paused:                getNullBool(flags, "paused"),
-		NoSetup:               getNullBool(flags, "no-setup"),
-		NoTeardown:            getNullBool(flags, "no-teardown"),
-		MaxRedirects:          getNullInt64(flags, "max-redirects"),
-		Batch:                 getNullInt64(flags, "batch"),
-		BatchPerHost:          getNullInt64(flags, "batch-per-host"),
-		RPS:                   getNullInt64(flags, "rps"),
-		UserAgent:             getNullString(flags, "user-agent"),
-		HTTPDebug:             getNullString(flags, "http-debug"),
-		InsecureSkipTLSVerify: getNullBool(flags, "insecure-skip-tls-verify"),
-		NoConnectionReuse:     getNullBool(flags, "no-connection-reuse"),
-		NoVUConnectionReuse:   getNullBool(flags, "no-vu-connection-reuse"),
-		MinIterationDuration:  getNullDuration(flags, "min-iteration-duration"),
-		Throw:                 getNullBool(flags, "throw"),
-		DiscardResponseBodies: getNullBool(flags, "discard-response-bodies"),
-		// Default values for options without CLI flags:
-		// TODO: find a saner and more dev-friendly and error-proof way to handle options
-		SetupTimeout:    types.NullDuration{Duration: types.Duration(60 * time.Second), Valid: false},
-		TeardownTimeout: types.NullDuration{Duration: types.Duration(60 * time.Second), Valid: false},
-
+		VUs:                     getNullInt64(flags, "vus"),
+		Duration:                getNullDuration(flags, "duration"),
+		Iterations:              getNullInt64(flags, "iterations"),
+		Paused:                  getNullBool(flags, "paused"),
+		NoSetup:                 getNullBool(flags, "no-setup"),
+		NoTeardown:              getNullBool(flags, "no-teardown"),
+		MaxRedirects:            getNullInt64(flags, "max-redirects"),
+		Batch:                   getNullInt64(flags, "batch"),
+		BatchPerHost:            getNullInt64(flags, "batch-per-host"),
+		RPS:                     getNullInt64(flags, "rps"),
+		UserAgent:               getNullString(flags, "user-agent"),
+		HTTPDebug:               getNullString(flags, "http-debug"),
+		InsecureSkipTLSVerify:   getNullBool(flags, "insecure-skip-tls-verify"),
+		NoConnectionReuse:       getNullBool(flags, "no-connection-reuse"),
+		NoVUConnectionReuse:     getNullBool(flags, "no-vu-connection-reuse"),
+		MinIterationDuration:    getNullDuration(flags, "min-iteration-duration"),
+		Throw:                   getNullBool(flags, "throw"),
+		DiscardResponseBodies:   getNullBool(flags, "discard-response-bodies"),
 		MetricSamplesBufferSize: null.NewInt(1000, false),
 	}
 
@@ -181,7 +171,7 @@ func getOptions(flags *pflag.FlagSet) (lib.Options, error) {
 		if err != nil {
 			return opts, err
 		}
-		opts.SystemTags = stats.ToSystemTagSet(systemTagList)
+		opts.SystemTags = metrics.ToSystemTagSet(systemTagList)
 	}
 
 	blacklistIPStrings, err := flags.GetStringSlice("blacklist-ip")
@@ -223,7 +213,7 @@ func getOptions(flags *pflag.FlagSet) (lib.Options, error) {
 		if errSts != nil {
 			return opts, errSts
 		}
-		if _, errSts = stats.GetResolversForTrendColumns(trendStats); err != nil {
+		if _, errSts = metrics.GetResolversForTrendColumns(trendStats); err != nil {
 			return opts, errSts
 		}
 		opts.SummaryTrendStats = trendStats
@@ -255,7 +245,7 @@ func getOptions(flags *pflag.FlagSet) (lib.Options, error) {
 			}
 			parsedRunTags[name] = value
 		}
-		opts.RunTags = stats.IntoSampleTags(&parsedRunTags)
+		opts.RunTags = metrics.IntoSampleTags(&parsedRunTags)
 	}
 
 	redirectConFile, err := flags.GetString("console-output")

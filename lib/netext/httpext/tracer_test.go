@@ -41,10 +41,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/lib/netext"
 	"go.k6.io/k6/lib/types"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 )
 
 const traceDelay = 100 * time.Millisecond
@@ -107,7 +106,7 @@ func getTestTracer(t *testing.T) (*Tracer, *httptrace.ClientTrace) {
 	return tracer, ct
 }
 
-func TestTracer(t *testing.T) {
+func TestTracer(t *testing.T) { //nolint:tparallel
 	t.Parallel()
 	srv := httptest.NewTLSServer(httpbin.New().Handler())
 	defer srv.Close()
@@ -133,7 +132,7 @@ func TestTracer(t *testing.T) {
 	}
 	builtinMetrics := metrics.RegisterBuiltinMetrics(metrics.NewRegistry())
 
-	for tnum, isReuse := range []bool{false, true, true} {
+	for tnum, isReuse := range []bool{false, true, true} { //nolint:paralleltest
 		t.Run(fmt.Sprintf("Test #%d", tnum), func(t *testing.T) {
 			// Do not enable parallel testing, test relies on sequential execution
 			req, err := http.NewRequest("GET", srv.URL+"/get", nil)
@@ -150,7 +149,7 @@ func TestTracer(t *testing.T) {
 				time.Sleep(traceDelay)
 			}
 			trail := tracer.Done()
-			trail.SaveSamples(builtinMetrics, stats.IntoSampleTags(&map[string]string{"tag": "value"}))
+			trail.SaveSamples(builtinMetrics, metrics.IntoSampleTags(&map[string]string{"tag": "value"}))
 			samples := trail.GetSamples()
 
 			assertLaterOrZero(t, tracer.getConn, isReuse)
@@ -166,7 +165,7 @@ func TestTracer(t *testing.T) {
 			assert.Equal(t, strings.TrimPrefix(srv.URL, "https://"), trail.ConnRemoteAddr.String())
 
 			assert.Len(t, samples, 8)
-			seenMetrics := map[*stats.Metric]bool{}
+			seenMetrics := map[*metrics.Metric]bool{}
 			for i, s := range samples {
 				assert.NotContains(t, seenMetrics, s.Metric)
 				seenMetrics[s.Metric] = true
@@ -278,7 +277,6 @@ func TestCancelledRequest(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	cancelTest := func(t *testing.T) {
-		t.Parallel()
 		tracer := &Tracer{}
 		req, err := http.NewRequestWithContext(context.Background(), "GET", srv.URL+"/delay/1", nil)
 		require.NoError(t, err)
@@ -301,7 +299,11 @@ func TestCancelledRequest(t *testing.T) {
 	t.Run("group", func(t *testing.T) {
 		t.Parallel()
 		for i := 0; i < 200; i++ {
-			t.Run(fmt.Sprintf("TestCancelledRequest_%d", i), cancelTest)
+			t.Run(fmt.Sprintf("TestCancelledRequest_%d", i),
+				func(t *testing.T) {
+					t.Parallel()
+					cancelTest(t)
+				})
 		}
 	})
 }

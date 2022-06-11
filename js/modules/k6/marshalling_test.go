@@ -31,12 +31,11 @@ import (
 
 	"go.k6.io/k6/js"
 	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/lib/testutils/httpmultibin"
 	"go.k6.io/k6/lib/types"
 	"go.k6.io/k6/loader"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 )
 
 func TestSetupDataMarshalling(t *testing.T) {
@@ -120,12 +119,14 @@ func TestSetupDataMarshalling(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	runner, err := js.New(
-		testutils.NewLogger(t),
+		&lib.RuntimeState{
+			Logger:         testutils.NewLogger(t),
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+		},
+
 		&loader.SourceData{URL: &url.URL{Path: "/script.js"}, Data: script},
 		nil,
-		lib.RuntimeOptions{},
-		builtinMetrics,
-		registry,
 	)
 
 	require.NoError(t, err)
@@ -137,7 +138,7 @@ func TestSetupDataMarshalling(t *testing.T) {
 
 	require.NoError(t, err)
 
-	samples := make(chan<- stats.SampleContainer, 100)
+	samples := make(chan<- metrics.SampleContainer, 100)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

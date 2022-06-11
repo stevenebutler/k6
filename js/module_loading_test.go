@@ -31,14 +31,13 @@ import (
 	"gopkg.in/guregu/null.v3"
 
 	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/lib/testutils/httpmultibin"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 )
 
-func newDevNullSampleChannel() chan stats.SampleContainer {
-	ch := make(chan stats.SampleContainer, 100)
+func newDevNullSampleChannel() chan metrics.SampleContainer {
+	ch := make(chan metrics.SampleContainer, 100)
 	go func() {
 		for range ch {
 		}
@@ -109,7 +108,11 @@ func TestLoadOnceGlobalVars(t *testing.T) {
 			arc := r1.MakeArchive()
 			registry := metrics.NewRegistry()
 			builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-			r2, err := NewFromArchive(testutils.NewLogger(t), arc, lib.RuntimeOptions{}, builtinMetrics, registry)
+			r2, err := NewFromArchive(&lib.RuntimeState{
+				Logger:         testutils.NewLogger(t),
+				BuiltinMetrics: builtinMetrics,
+				Registry:       registry,
+			}, arc)
 			require.NoError(t, err)
 
 			runners := map[string]*Runner{"Source": r1, "Archive": r2}
@@ -162,7 +165,12 @@ func TestLoadExportsIsUsableInModule(t *testing.T) {
 	arc := r1.MakeArchive()
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	r2, err := NewFromArchive(testutils.NewLogger(t), arc, lib.RuntimeOptions{}, builtinMetrics, registry)
+	r2, err := NewFromArchive(
+		&lib.RuntimeState{
+			Logger:         testutils.NewLogger(t),
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+		}, arc)
 	require.NoError(t, err)
 
 	runners := map[string]*Runner{"Source": r1, "Archive": r2}
@@ -212,7 +220,12 @@ func TestLoadDoesntBreakHTTPGet(t *testing.T) {
 	arc := r1.MakeArchive()
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	r2, err := NewFromArchive(testutils.NewLogger(t), arc, lib.RuntimeOptions{}, builtinMetrics, registry)
+	r2, err := NewFromArchive(
+		&lib.RuntimeState{
+			Logger:         testutils.NewLogger(t),
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+		}, arc)
 	require.NoError(t, err)
 
 	runners := map[string]*Runner{"Source": r1, "Archive": r2}
@@ -260,7 +273,12 @@ func TestLoadGlobalVarsAreNotSharedBetweenVUs(t *testing.T) {
 	arc := r1.MakeArchive()
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	r2, err := NewFromArchive(testutils.NewLogger(t), arc, lib.RuntimeOptions{}, builtinMetrics, registry)
+	r2, err := NewFromArchive(
+		&lib.RuntimeState{
+			Logger:         testutils.NewLogger(t),
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+		}, arc)
 	require.NoError(t, err)
 
 	runners := map[string]*Runner{"Source": r1, "Archive": r2}
@@ -327,7 +345,12 @@ func TestLoadCycle(t *testing.T) {
 	arc := r1.MakeArchive()
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	r2, err := NewFromArchive(testutils.NewLogger(t), arc, lib.RuntimeOptions{}, builtinMetrics, registry)
+	r2, err := NewFromArchive(
+		&lib.RuntimeState{
+			Logger:         testutils.NewLogger(t),
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+		}, arc)
 	require.NoError(t, err)
 
 	runners := map[string]*Runner{"Source": r1, "Archive": r2}
@@ -392,7 +415,12 @@ func TestLoadCycleBinding(t *testing.T) {
 	arc := r1.MakeArchive()
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	r2, err := NewFromArchive(testutils.NewLogger(t), arc, lib.RuntimeOptions{}, builtinMetrics, registry)
+	r2, err := NewFromArchive(
+		&lib.RuntimeState{
+			Logger:         testutils.NewLogger(t),
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+		}, arc)
 	require.NoError(t, err)
 
 	runners := map[string]*Runner{"Source": r1, "Archive": r2}
@@ -460,7 +488,12 @@ func TestBrowserified(t *testing.T) {
 	arc := r1.MakeArchive()
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	r2, err := NewFromArchive(testutils.NewLogger(t), arc, lib.RuntimeOptions{}, builtinMetrics, registry)
+	r2, err := NewFromArchive(
+		&lib.RuntimeState{
+			Logger:         testutils.NewLogger(t),
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+		}, arc)
 	require.NoError(t, err)
 
 	runners := map[string]*Runner{"Source": r1, "Archive": r2}
@@ -468,7 +501,7 @@ func TestBrowserified(t *testing.T) {
 		r := r
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			ch := make(chan stats.SampleContainer, 100)
+			ch := make(chan metrics.SampleContainer, 100)
 			defer close(ch)
 			initVU, err := r.NewVU(1, 1, ch)
 			require.NoError(t, err)
@@ -506,7 +539,12 @@ func TestLoadingUnexistingModuleDoesntPanic(t *testing.T) {
 	require.NoError(t, err)
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	r2, err := NewFromArchive(testutils.NewLogger(t), arc, lib.RuntimeOptions{}, builtinMetrics, registry)
+	r2, err := NewFromArchive(
+		&lib.RuntimeState{
+			Logger:         testutils.NewLogger(t),
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+		}, arc)
 	require.NoError(t, err)
 
 	runners := map[string]*Runner{"Source": r1, "Archive": r2}
@@ -543,7 +581,12 @@ func TestLoadingSourceMapsDoesntErrorOut(t *testing.T) {
 	require.NoError(t, err)
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	r2, err := NewFromArchive(testutils.NewLogger(t), arc, lib.RuntimeOptions{}, builtinMetrics, registry)
+	r2, err := NewFromArchive(
+		&lib.RuntimeState{
+			Logger:         testutils.NewLogger(t),
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+		}, arc)
 	require.NoError(t, err)
 
 	runners := map[string]*Runner{"Source": r1, "Archive": r2}

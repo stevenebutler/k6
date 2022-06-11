@@ -32,9 +32,8 @@ import (
 	"gopkg.in/guregu/null.v3"
 
 	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/lib/types"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 	"go.k6.io/k6/ui/pb"
 )
 
@@ -79,20 +78,20 @@ var _ lib.ExecutorConfig = &RampingArrivalRateConfig{}
 
 // GetPreAllocatedVUs is just a helper method that returns the scaled pre-allocated VUs.
 func (varc RampingArrivalRateConfig) GetPreAllocatedVUs(et *lib.ExecutionTuple) int64 {
-	return et.Segment.Scale(varc.PreAllocatedVUs.Int64)
+	return et.ScaleInt64(varc.PreAllocatedVUs.Int64)
 }
 
 // GetMaxVUs is just a helper method that returns the scaled max VUs.
 func (varc RampingArrivalRateConfig) GetMaxVUs(et *lib.ExecutionTuple) int64 {
-	return et.Segment.Scale(varc.MaxVUs.Int64)
+	return et.ScaleInt64(varc.MaxVUs.Int64)
 }
 
 // GetDescription returns a human-readable description of the executor options
 func (varc RampingArrivalRateConfig) GetDescription(et *lib.ExecutionTuple) string {
 	// TODO: something better? always show iterations per second?
-	maxVUsRange := fmt.Sprintf("maxVUs: %d", et.Segment.Scale(varc.PreAllocatedVUs.Int64))
+	maxVUsRange := fmt.Sprintf("maxVUs: %d", et.ScaleInt64(varc.PreAllocatedVUs.Int64))
 	if varc.MaxVUs.Int64 > varc.PreAllocatedVUs.Int64 {
-		maxVUsRange += fmt.Sprintf("-%d", et.Segment.Scale(varc.MaxVUs.Int64))
+		maxVUsRange += fmt.Sprintf("-%d", et.ScaleInt64(varc.MaxVUs.Int64))
 	}
 	maxUnscaledRate := getStagesUnscaledMaxTarget(varc.StartRate.Int64, varc.Stages)
 	maxArrRatePerSec, _ := getArrivalRatePerSec(
@@ -109,11 +108,11 @@ func (varc *RampingArrivalRateConfig) Validate() []error {
 	errors := varc.BaseConfig.Validate()
 
 	if varc.StartRate.Int64 < 0 {
-		errors = append(errors, fmt.Errorf("the startRate value shouldn't be negative"))
+		errors = append(errors, fmt.Errorf("the startRate value can't be negative"))
 	}
 
 	if varc.TimeUnit.TimeDuration() < 0 {
-		errors = append(errors, fmt.Errorf("the timeUnit should be more than 0"))
+		errors = append(errors, fmt.Errorf("the timeUnit must be more than 0"))
 	}
 
 	errors = append(errors, validateStages(varc.Stages)...)
@@ -121,14 +120,14 @@ func (varc *RampingArrivalRateConfig) Validate() []error {
 	if !varc.PreAllocatedVUs.Valid {
 		errors = append(errors, fmt.Errorf("the number of preAllocatedVUs isn't specified"))
 	} else if varc.PreAllocatedVUs.Int64 < 0 {
-		errors = append(errors, fmt.Errorf("the number of preAllocatedVUs shouldn't be negative"))
+		errors = append(errors, fmt.Errorf("the number of preAllocatedVUs can't be negative"))
 	}
 
 	if !varc.MaxVUs.Valid {
 		// TODO: don't change the config while validating
 		varc.MaxVUs.Int64 = varc.PreAllocatedVUs.Int64
 	} else if varc.MaxVUs.Int64 < varc.PreAllocatedVUs.Int64 {
-		errors = append(errors, fmt.Errorf("maxVUs shouldn't be less than preAllocatedVUs"))
+		errors = append(errors, fmt.Errorf("maxVUs can't be less than preAllocatedVUs"))
 	}
 
 	return errors
@@ -143,8 +142,8 @@ func (varc RampingArrivalRateConfig) GetExecutionRequirements(et *lib.ExecutionT
 	return []lib.ExecutionStep{
 		{
 			TimeOffset:      0,
-			PlannedVUs:      uint64(et.Segment.Scale(varc.PreAllocatedVUs.Int64)),
-			MaxUnplannedVUs: uint64(et.Segment.Scale(varc.MaxVUs.Int64 - varc.PreAllocatedVUs.Int64)),
+			PlannedVUs:      uint64(et.ScaleInt64(varc.PreAllocatedVUs.Int64)),
+			MaxUnplannedVUs: uint64(et.ScaleInt64(varc.MaxVUs.Int64 - varc.PreAllocatedVUs.Int64)),
 		},
 		{
 			TimeOffset:      sumStagesDuration(varc.Stages) + varc.GracefulStop.TimeDuration(),
@@ -320,9 +319,7 @@ func noNegativeSqrt(f float64) float64 {
 // This will allow us to implement https://github.com/k6io/k6/issues/1386
 // and things like all of the TODOs below in one place only.
 //nolint:funlen,cyclop
-func (varr RampingArrivalRate) Run(
-	parentCtx context.Context, out chan<- stats.SampleContainer, builtinMetrics *metrics.BuiltinMetrics,
-) (err error) {
+func (varr RampingArrivalRate) Run(parentCtx context.Context, out chan<- metrics.SampleContainer) (err error) {
 	segment := varr.executionState.ExecutionTuple.Segment
 	gracefulStop := varr.config.GetGracefulStop()
 	duration := sumStagesDuration(varr.config.Stages)
@@ -345,6 +342,7 @@ func (varr RampingArrivalRate) Run(
 	activeVUsWg := &sync.WaitGroup{}
 
 	returnedVUs := make(chan struct{})
+	waitOnProgressChannel := make(chan struct{})
 	startTime, maxDurationCtx, regDurationCtx, cancel := getDurationContexts(parentCtx, duration, gracefulStop)
 
 	vusPool := newActiveVUPool()
@@ -357,12 +355,13 @@ func (varr RampingArrivalRate) Run(
 		vusPool.Close()
 		cancel()
 		activeVUsWg.Wait()
+		<-waitOnProgressChannel
 	}()
 
 	activeVUsCount := uint64(0)
 	tickerPeriod := int64(startTickerPeriod.Duration)
 	vusFmt := pb.GetFixedLengthIntFormat(maxVUs)
-	itersFmt := pb.GetFixedLengthFloatFormat(maxArrivalRatePerSec, 0) + " iters/s"
+	itersFmt := pb.GetFixedLengthFloatFormat(maxArrivalRatePerSec, 2) + " iters/s"
 
 	progressFn := func() (float64, []string) {
 		currActiveVUs := atomic.LoadUint64(&activeVUsCount)
@@ -391,14 +390,16 @@ func (varr RampingArrivalRate) Run(
 	}
 
 	varr.progress.Modify(pb.WithProgress(progressFn))
-	go trackProgress(parentCtx, maxDurationCtx, regDurationCtx, &varr, progressFn)
-
 	maxDurationCtx = lib.WithScenarioState(maxDurationCtx, &lib.ScenarioState{
 		Name:       varr.config.Name,
 		Executor:   varr.config.Type,
 		StartTime:  startTime,
 		ProgressFn: progressFn,
 	})
+	go func() {
+		trackProgress(parentCtx, maxDurationCtx, regDurationCtx, &varr, progressFn)
+		close(waitOnProgressChannel)
+	}()
 
 	returnVU := func(u lib.InitializedVU) {
 		varr.executionState.ReturnVU(u, true)
@@ -456,7 +457,7 @@ func (varr RampingArrivalRate) Run(
 	shownWarning := false
 	metricTags := varr.getMetricTags(nil)
 	go varr.config.cal(varr.et, ch)
-	droppedIterationMetric := builtinMetrics.DroppedIterations
+	droppedIterationMetric := varr.executionState.BuiltinMetrics.DroppedIterations
 	for nextTime := range ch {
 		select {
 		case <-regDurationDone:
@@ -482,7 +483,7 @@ func (varr RampingArrivalRate) Run(
 		// Since there aren't any free VUs available, consider this iteration
 		// dropped - we aren't going to try to recover it, but
 
-		stats.PushIfNotDone(parentCtx, out, droppedIterationMetric.Sample(time.Now(), metricTags, 1))
+		metrics.PushIfNotDone(parentCtx, out, droppedIterationMetric.Sample(time.Now(), metricTags, 1))
 
 		// We'll try to start allocating another VU in the background,
 		// non-blockingly, if we have remainingUnplannedVUs...

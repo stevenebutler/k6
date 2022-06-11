@@ -104,27 +104,6 @@ sudo dnf install k6    # use yum install --nogpgcheck k6 for older distros (e.g.
 Note that the `gnupg2` package is required for signature verification.
 
 
-#### Migrating from Bintray
-
-The Bintray repositories were [shut down after May 1st, 2021](https://jfrog.com/blog/into-the-sunset-bintray-jcenter-gocenter-and-chartcenter/). If you previously added them, you will have to add our repositories following the instructions above and should delete the Bintray ones.
-
-For Debian-based distributions, you can run:
-
-```bash
-sudo sed -i '/dl\.bintray\.com\/loadimpact\/deb/d' /etc/apt/sources.list
-sudo apt-key del 379CE192D401AB61
-sudo apt-get update
-```
-
-Or delete the repository file if you added it to `/etc/apt/sources.list.d/`.
-
-And for rpm-based ones, delete the repository file in `/etc/yum.repos.d/`. If you followed the [official installation instructions](https://k6.io/docs/getting-started/installation/#fedora-centos), this should be:
-
-```bash
-sudo rm /etc/yum.repos.d/bintray-loadimpact-rpm.repo
-```
-
-
 ### Docker
 
 ```bash
@@ -137,11 +116,9 @@ In case there isn't an official package for your operating system or architectur
 
 ### Build from source
 
-k6 is written in Go, so it's just a single statically-linked executable and very easy to build and distribute. To build from source you need **[Git](https://git-scm.com/downloads)** and **[Go](https://golang.org/doc/install)** (1.16 or newer). Follow these instructions:
+k6 is written in Go, so it's just a single statically-linked executable and very easy to build and distribute. To build from source you need **[Go](https://go.dev/doc/install)** (1.17 or newer). Follow these instructions:
 
-- Run `go install go.k6.io/k6` which will:
-  - git clone the repo and put the source in `$GOPATH/src/go.k6.io/k6`
-  - build a `k6` binary and put it in `$GOPATH/bin`
+- Run `go install go.k6.io/k6@latest` which will build a `k6` binary and put it in the `$GOBIN` folder (which defaults to `$GOPATH/bin`).
 - Make sure you have `$GOPATH/bin` in your `PATH` (or copy the `k6` binary somewhere in your `PATH`), so you are able to run k6 from any location.
 - Tada, you can now run k6 using `k6 run script.js`
 

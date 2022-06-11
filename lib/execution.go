@@ -30,8 +30,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"go.k6.io/k6/lib/metrics"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 )
 
 // An ExecutionScheduler is in charge of initializing executors and using them
@@ -58,14 +57,11 @@ type ExecutionScheduler interface {
 	GetExecutors() []Executor
 
 	// Init initializes all executors, including all of their needed VUs.
-	Init(ctx context.Context, samplesOut chan<- stats.SampleContainer) error
+	Init(ctx context.Context, samplesOut chan<- metrics.SampleContainer) error
 
 	// Run the ExecutionScheduler, funneling the generated metric samples
 	// through the supplied out channel.
-	Run(
-		globalCtx, runCtx context.Context, samplesOut chan<- stats.SampleContainer,
-		builtinMetrics *metrics.BuiltinMetrics,
-	) error
+	Run(globalCtx, runCtx context.Context, samplesOut chan<- metrics.SampleContainer) error
 
 	// Pause a test, or start/resume it. To check if a test is paused, use
 	// GetState().IsPaused().
@@ -155,6 +151,8 @@ type ExecutionState struct {
 	Options Options
 
 	ExecutionTuple *ExecutionTuple // TODO Rename, possibly move
+
+	BuiltinMetrics *metrics.BuiltinMetrics
 
 	// vus is the shared channel buffer that contains all of the VUs that have
 	// been initialized and aren't currently being used by a executor.
@@ -277,7 +275,10 @@ type ExecutionState struct {
 // NewExecutionState initializes all of the pointers in the ExecutionState
 // with zeros. It also makes sure that the initial state is unpaused, by
 // setting resumeNotify to an already closed channel.
-func NewExecutionState(options Options, et *ExecutionTuple, maxPlannedVUs, maxPossibleVUs uint64) *ExecutionState {
+func NewExecutionState(
+	options Options, et *ExecutionTuple, builtinMetrics *metrics.BuiltinMetrics,
+	maxPlannedVUs, maxPossibleVUs uint64,
+) *ExecutionState {
 	resumeNotify := make(chan struct{})
 	close(resumeNotify) // By default the ExecutionState starts unpaused
 
@@ -285,8 +286,11 @@ func NewExecutionState(options Options, et *ExecutionTuple, maxPlannedVUs, maxPo
 
 	segIdx := NewSegmentedIndex(et)
 	return &ExecutionState{
-		Options: options,
-		vus:     make(chan InitializedVU, maxPossibleVUs),
+		Options:        options,
+		ExecutionTuple: et,
+		BuiltinMetrics: builtinMetrics,
+
+		vus: make(chan InitializedVU, maxPossibleVUs),
 
 		executionStatus:            new(uint32),
 		vuIDSegIndexMx:             new(sync.Mutex),
@@ -302,7 +306,6 @@ func NewExecutionState(options Options, et *ExecutionTuple, maxPlannedVUs, maxPo
 		pauseStateLock:             sync.RWMutex{},
 		totalPausedDuration:        0, // Accessed only behind the pauseStateLock
 		resumeNotify:               resumeNotify,
-		ExecutionTuple:             et,
 	}
 }
 

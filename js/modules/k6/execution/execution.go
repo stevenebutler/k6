@@ -21,6 +21,7 @@
 package execution
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/dop251/goja"
 
+	"go.k6.io/k6/errext"
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modules"
 	"go.k6.io/k6/lib"
@@ -167,17 +169,30 @@ func (mi *ModuleInstance) newInstanceInfo() (*goja.Object, error) {
 // newTestInfo returns a goja.Object with property accessors to retrieve
 // information and control execution of the overall test run.
 func (mi *ModuleInstance) newTestInfo() (*goja.Object, error) {
+	// the cache of goja.Object in the optimal parsed form
+	// for the consolidated and derived lib.Options
+	var optionsObject *goja.Object
 	rt := mi.vu.Runtime()
 	ti := map[string]func() interface{}{
 		// stop the test run
 		"abort": func() interface{} {
 			return func(msg goja.Value) {
-				reason := common.AbortTest
+				reason := errext.AbortTest
 				if msg != nil && !goja.IsUndefined(msg) {
 					reason = fmt.Sprintf("%s: %s", reason, msg.String())
 				}
-				rt.Interrupt(&common.InterruptError{Reason: reason})
+				rt.Interrupt(&errext.InterruptError{Reason: reason})
 			}
+		},
+		"options": func() interface{} {
+			if optionsObject == nil {
+				opts, err := optionsAsObject(rt, mi.vu.State().Options)
+				if err != nil {
+					common.Throw(rt, err)
+				}
+				optionsObject = opts
+			}
+			return optionsObject
 		},
 	}
 
@@ -227,6 +242,69 @@ func newInfoObj(rt *goja.Runtime, props map[string]func() interface{}) (*goja.Ob
 	return o, nil
 }
 
+// optionsAsObject maps the lib.Options struct that contains the consolidated
+// and derived options configuration in a goja.Object.
+//
+// When values are not set then the default value returned from JSON is used.
+// Most of the lib.Options are Nullable types so they will be null on default.
+func optionsAsObject(rt *goja.Runtime, options lib.Options) (*goja.Object, error) {
+	b, err := json.Marshal(options)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode the lib.Options as json: %w", err)
+	}
+
+	// Using the native JS parser function guarantees getting
+	// the supported types for deep freezing the complex object.
+	jsonParse, _ := goja.AssertFunction(rt.GlobalObject().Get("JSON").ToObject(rt).Get("parse"))
+	parsed, err := jsonParse(goja.Undefined(), rt.ToValue(string(b)))
+	if err != nil {
+		common.Throw(rt, err)
+	}
+
+	obj := parsed.ToObject(rt)
+
+	mustDelete := func(prop string) {
+		delErr := obj.Delete(prop)
+		if err != nil {
+			common.Throw(rt, delErr)
+		}
+	}
+	mustSetReadOnlyProperty := func(k string, v interface{}) {
+		defErr := obj.DefineDataProperty(k, rt.ToValue(v), goja.FLAG_FALSE, goja.FLAG_FALSE, goja.FLAG_TRUE)
+		if err != nil {
+			common.Throw(rt, defErr)
+		}
+	}
+
+	mustDelete("vus")
+	mustDelete("iterations")
+	mustDelete("duration")
+	mustDelete("stages")
+
+	consoleOutput := goja.Null()
+	if options.ConsoleOutput.Valid {
+		consoleOutput = rt.ToValue(options.ConsoleOutput.String)
+	}
+	mustSetReadOnlyProperty("consoleOutput", consoleOutput)
+
+	localIPs := goja.Null()
+	if options.LocalIPs.Valid {
+		raw, marshalErr := options.LocalIPs.MarshalText()
+		if err != nil {
+			common.Throw(rt, marshalErr)
+		}
+		localIPs = rt.ToValue(string(raw))
+	}
+	mustSetReadOnlyProperty("localIPs", localIPs)
+
+	err = common.FreezeObject(rt, obj)
+	if err != nil {
+		common.Throw(rt, err)
+	}
+
+	return obj, nil
+}
+
 type tagsDynamicObject struct {
 	Runtime *goja.Runtime
 	State   *lib.State
@@ -247,7 +325,11 @@ func (o *tagsDynamicObject) Get(key string) goja.Value {
 // In any other case, if the Throw option is set then an error is raised
 // otherwise just a Warning is written.
 func (o *tagsDynamicObject) Set(key string, val goja.Value) bool {
-	switch val.ExportType().Kind() { //nolint:exhaustive
+	kind := reflect.Invalid
+	if typ := val.ExportType(); typ != nil {
+		kind = typ.Kind()
+	}
+	switch kind {
 	case
 		reflect.String,
 		reflect.Bool,
@@ -257,12 +339,11 @@ func (o *tagsDynamicObject) Set(key string, val goja.Value) bool {
 		o.State.Tags.Set(key, val.String())
 		return true
 	default:
-		err := fmt.Errorf("only String, Boolean and Number types are accepted as a Tag value")
+		reason := "only String, Boolean and Number types are accepted as a Tag value"
 		if o.State.Options.Throw.Bool {
-			common.Throw(o.Runtime, err)
-			return false
+			panic(o.Runtime.NewTypeError(reason))
 		}
-		o.State.Logger.Warnf("the execution.vu.tags.Set('%s') operation has been discarded because %s", key, err.Error())
+		o.State.Logger.Warnf("the execution.vu.tags.Set('%s') operation has been discarded because %s", key, reason)
 		return false
 	}
 }

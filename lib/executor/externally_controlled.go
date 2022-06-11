@@ -33,9 +33,8 @@ import (
 	"gopkg.in/guregu/null.v3"
 
 	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/lib/types"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 	"go.k6.io/k6/ui/pb"
 )
 
@@ -69,7 +68,7 @@ type ExternallyControlledConfigParams struct {
 // Validate just checks the control options in isolation.
 func (mecc ExternallyControlledConfigParams) Validate() (errors []error) {
 	if mecc.VUs.Int64 < 0 {
-		errors = append(errors, fmt.Errorf("the number of VUs shouldn't be negative"))
+		errors = append(errors, fmt.Errorf("the number of VUs can't be negative"))
 	}
 
 	if mecc.MaxVUs.Int64 < mecc.VUs.Int64 {
@@ -80,10 +79,10 @@ func (mecc ExternallyControlledConfigParams) Validate() (errors []error) {
 	}
 
 	if !mecc.Duration.Valid {
-		errors = append(errors, fmt.Errorf("the duration should be specified, for infinite duration use 0"))
+		errors = append(errors, fmt.Errorf("the duration must be specified, for infinite duration use 0"))
 	} else if mecc.Duration.TimeDuration() < 0 {
 		errors = append(errors, fmt.Errorf(
-			"the duration shouldn't be negative, for infinite duration use 0",
+			"the duration can't be negative, for infinite duration use 0",
 		))
 	}
 
@@ -144,8 +143,8 @@ func (mec ExternallyControlledConfig) Validate() []error {
 func (mec ExternallyControlledConfig) GetExecutionRequirements(et *lib.ExecutionTuple) []lib.ExecutionStep {
 	startVUs := lib.ExecutionStep{
 		TimeOffset:      0,
-		PlannedVUs:      uint64(et.Segment.Scale(mec.MaxVUs.Int64)), // user-configured, VUs to be pre-initialized
-		MaxUnplannedVUs: 0,                                          // intentional, see function comment
+		PlannedVUs:      uint64(et.ScaleInt64(mec.MaxVUs.Int64)), // user-configured, VUs to be pre-initialized
+		MaxUnplannedVUs: 0,                                       // intentional, see function comment
 	}
 
 	maxDuration := mec.Duration.TimeDuration()
@@ -434,11 +433,11 @@ func (rs *externallyControlledRunState) progressFn() (float64, []string) {
 
 func (rs *externallyControlledRunState) handleConfigChange(oldCfg, newCfg ExternallyControlledConfigParams) error {
 	executionState := rs.executor.executionState
-	segment := executionState.Options.ExecutionSegment
-	oldActiveVUs := segment.Scale(oldCfg.VUs.Int64)
-	oldMaxVUs := segment.Scale(oldCfg.MaxVUs.Int64)
-	newActiveVUs := segment.Scale(newCfg.VUs.Int64)
-	newMaxVUs := segment.Scale(newCfg.MaxVUs.Int64)
+	et := executionState.ExecutionTuple
+	oldActiveVUs := et.ScaleInt64(oldCfg.VUs.Int64)
+	oldMaxVUs := et.ScaleInt64(oldCfg.MaxVUs.Int64)
+	newActiveVUs := et.ScaleInt64(newCfg.VUs.Int64)
+	newMaxVUs := et.ScaleInt64(newCfg.MaxVUs.Int64)
 
 	rs.executor.logger.WithFields(logrus.Fields{
 		"oldActiveVUs": oldActiveVUs, "oldMaxVUs": oldMaxVUs,
@@ -500,9 +499,7 @@ func (rs *externallyControlledRunState) handleConfigChange(oldCfg, newCfg Extern
 // dynamically controlled number of VUs either for the specified duration, or
 // until the test is manually stopped.
 // nolint:funlen,gocognit,cyclop
-func (mex *ExternallyControlled) Run(
-	parentCtx context.Context, out chan<- stats.SampleContainer, _ *metrics.BuiltinMetrics,
-) (err error) {
+func (mex *ExternallyControlled) Run(parentCtx context.Context, out chan<- metrics.SampleContainer) (err error) {
 	mex.configLock.RLock()
 	// Safely get the current config - it's important that the close of the
 	// hasStarted channel is inside of the lock, so that there are no data races
@@ -512,7 +509,11 @@ func (mex *ExternallyControlled) Run(
 	mex.configLock.RUnlock()
 
 	ctx, cancel := context.WithCancel(parentCtx)
-	defer cancel()
+	waitOnProgressChannel := make(chan struct{})
+	defer func() {
+		cancel()
+		<-waitOnProgressChannel
+	}()
 
 	duration := currentControlConfig.Duration.TimeDuration()
 	if duration > 0 { // Only keep track of duration if it's not infinite
@@ -523,7 +524,7 @@ func (mex *ExternallyControlled) Run(
 		logrus.Fields{"type": externallyControlledType, "duration": duration},
 	).Debug("Starting executor run...")
 
-	startMaxVUs := mex.executionState.Options.ExecutionSegment.Scale(mex.config.MaxVUs.Int64)
+	startMaxVUs := mex.executionState.ExecutionTuple.ScaleInt64(mex.config.MaxVUs.Int64)
 
 	ss := &lib.ScenarioState{
 		Name:      mex.config.Name,
@@ -551,7 +552,10 @@ func (mex *ExternallyControlled) Run(
 	}
 
 	mex.progress.Modify(pb.WithProgress(runState.progressFn)) // Keep track of the progress
-	go trackProgress(parentCtx, ctx, ctx, mex, runState.progressFn)
+	go func() {
+		trackProgress(parentCtx, ctx, ctx, mex, runState.progressFn)
+		close(waitOnProgressChannel)
+	}()
 
 	err = runState.handleConfigChange( // Start by setting MaxVUs to the starting MaxVUs
 		ExternallyControlledConfigParams{MaxVUs: mex.config.MaxVUs}, currentControlConfig,

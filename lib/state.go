@@ -32,8 +32,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"golang.org/x/time/rate"
 
-	"go.k6.io/k6/lib/metrics"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 )
 
 // DialContexter is an interface that can dial with a context
@@ -66,7 +65,7 @@ type State struct {
 	RPSLimit *rate.Limiter
 
 	// Sample channel, possibly buffered
-	Samples chan<- stats.SampleContainer
+	Samples chan<- metrics.SampleContainer
 
 	// Buffer pool; use instead of allocating fresh buffers when possible.
 	// TODO: maybe use https://golang.org/pkg/sync/#Pool ?

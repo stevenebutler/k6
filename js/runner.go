@@ -21,7 +21,6 @@
 package js
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -32,7 +31,6 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"os"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,13 +46,13 @@ import (
 	"go.k6.io/k6/errext"
 	"go.k6.io/k6/errext/exitcodes"
 	"go.k6.io/k6/js/common"
+	"go.k6.io/k6/js/eventloop"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/consts"
-	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/lib/netext"
 	"go.k6.io/k6/lib/types"
 	"go.k6.io/k6/loader"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 )
 
 // Ensure Runner implements the lib.Runner interface
@@ -81,38 +79,34 @@ type Runner struct {
 
 	console   *console
 	setupData []byte
+
+	keylogger io.Writer
 }
 
 // New returns a new Runner for the provide source
 func New(
-	logger *logrus.Logger, src *loader.SourceData, filesystems map[string]afero.Fs, rtOpts lib.RuntimeOptions,
-	builtinMetrics *metrics.BuiltinMetrics, registry *metrics.Registry,
+	rs *lib.RuntimeState, src *loader.SourceData, filesystems map[string]afero.Fs,
 ) (*Runner, error) {
-	bundle, err := NewBundle(logger, src, filesystems, rtOpts, registry)
+	bundle, err := NewBundle(rs.Logger, src, filesystems, rs.RuntimeOptions, rs.Registry)
 	if err != nil {
 		return nil, err
 	}
 
-	return NewFromBundle(logger, bundle, builtinMetrics, registry)
+	return NewFromBundle(rs, bundle)
 }
 
 // NewFromArchive returns a new Runner from the source in the provided archive
-func NewFromArchive(
-	logger *logrus.Logger, arc *lib.Archive, rtOpts lib.RuntimeOptions,
-	builtinMetrics *metrics.BuiltinMetrics, registry *metrics.Registry,
-) (*Runner, error) {
-	bundle, err := NewBundleFromArchive(logger, arc, rtOpts, registry)
+func NewFromArchive(rs *lib.RuntimeState, arc *lib.Archive) (*Runner, error) {
+	bundle, err := NewBundleFromArchive(rs.Logger, arc, rs.RuntimeOptions, rs.Registry)
 	if err != nil {
 		return nil, err
 	}
 
-	return NewFromBundle(logger, bundle, builtinMetrics, registry)
+	return NewFromBundle(rs, bundle)
 }
 
 // NewFromBundle returns a new Runner from the provided Bundle
-func NewFromBundle(
-	logger *logrus.Logger, b *Bundle, builtinMetrics *metrics.BuiltinMetrics, registry *metrics.Registry,
-) (*Runner, error) {
+func NewFromBundle(rs *lib.RuntimeState, b *Bundle) (*Runner, error) {
 	defaultGroup, err := lib.NewGroup("", nil)
 	if err != nil {
 		return nil, err
@@ -121,19 +115,20 @@ func NewFromBundle(
 	defDNS := types.DefaultDNSConfig()
 	r := &Runner{
 		Bundle:       b,
-		Logger:       logger,
+		Logger:       rs.Logger,
 		defaultGroup: defaultGroup,
 		BaseDialer: net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 			DualStack: true,
 		},
-		console: newConsole(logger),
+		console: newConsole(rs.Logger),
 		Resolver: netext.NewResolver(
 			net.LookupIP, 0, defDNS.Select.DNSSelect, defDNS.Policy.DNSPolicy),
 		ActualResolver: net.LookupIP,
-		builtinMetrics: builtinMetrics,
-		registry:       registry,
+		builtinMetrics: rs.BuiltinMetrics,
+		registry:       rs.Registry,
+		keylogger:      rs.KeyLogger,
 	}
 
 	err = r.SetOptions(r.Bundle.Options)
@@ -146,7 +141,7 @@ func (r *Runner) MakeArchive() *lib.Archive {
 }
 
 // NewVU returns a new initialized VU.
-func (r *Runner) NewVU(idLocal, idGlobal uint64, samplesOut chan<- stats.SampleContainer) (lib.InitializedVU, error) {
+func (r *Runner) NewVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.SampleContainer) (lib.InitializedVU, error) {
 	vu, err := r.newVU(idLocal, idGlobal, samplesOut)
 	if err != nil {
 		return nil, err
@@ -155,7 +150,7 @@ func (r *Runner) NewVU(idLocal, idGlobal uint64, samplesOut chan<- stats.SampleC
 }
 
 // nolint:funlen
-func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- stats.SampleContainer) (*VU, error) {
+func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.SampleContainer) (*VU, error) {
 	// Instantiate a new bundle, make a VU out of it.
 	moduleVUImpl := newModuleVUImpl()
 	bi, err := r.Bundle.Instantiate(r.Logger, idLocal, moduleVUImpl)
@@ -209,6 +204,7 @@ func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- stats.SampleC
 		MaxVersion:         uint16(tlsVersions.Max),
 		Certificates:       certs,
 		Renegotiation:      tls.RenegotiateFreelyAsClient,
+		KeyLogWriter:       r.keylogger,
 	}
 	// Follow NameToCertificate in https://pkg.go.dev/crypto/tls@go1.17.6#Config, leave this field nil
 	// when it is empty
@@ -306,7 +302,7 @@ func forceHTTP1() bool {
 }
 
 // Setup runs the setup function if there is one and sets the setupData to the returned value
-func (r *Runner) Setup(ctx context.Context, out chan<- stats.SampleContainer) error {
+func (r *Runner) Setup(ctx context.Context, out chan<- metrics.SampleContainer) error {
 	setupCtx, setupCancel := context.WithTimeout(ctx, r.getTimeoutFor(consts.SetupFn))
 	defer setupCancel()
 
@@ -338,7 +334,8 @@ func (r *Runner) SetSetupData(data []byte) {
 	r.setupData = data
 }
 
-func (r *Runner) Teardown(ctx context.Context, out chan<- stats.SampleContainer) error {
+// Teardown runs the teardown function if there is one.
+func (r *Runner) Teardown(ctx context.Context, out chan<- metrics.SampleContainer) error {
 	teardownCtx, teardownCancel := context.WithTimeout(ctx, r.getTimeoutFor(consts.TeardownFn))
 	defer teardownCancel()
 
@@ -373,7 +370,7 @@ func (r *Runner) IsExecutable(name string) bool {
 func (r *Runner) HandleSummary(ctx context.Context, summary *lib.Summary) (map[string]io.Reader, error) {
 	summaryDataForJS := summarizeMetricsToObject(summary, r.Bundle.Options, r.setupData)
 
-	out := make(chan stats.SampleContainer, 100)
+	out := make(chan metrics.SampleContainer, 100)
 	defer close(out)
 
 	go func() { // discard all metrics
@@ -517,7 +514,12 @@ func parseTTL(ttlS string) (time.Duration, error) {
 
 // Runs an exported function in its own temporary VU, optionally with an argument. Execution is
 // interrupted if the context expires. No error is returned if the part does not exist.
-func (r *Runner) runPart(ctx context.Context, out chan<- stats.SampleContainer, name string, arg interface{}) (goja.Value, error) {
+func (r *Runner) runPart(
+	ctx context.Context,
+	out chan<- metrics.SampleContainer,
+	name string,
+	arg interface{},
+) (goja.Value, error) {
 	vu, err := r.newVU(0, 0, out)
 	if err != nil {
 		return goja.Undefined(), err
@@ -544,7 +546,7 @@ func (r *Runner) runPart(ctx context.Context, out chan<- stats.SampleContainer, 
 		return goja.Undefined(), err
 	}
 
-	if r.Bundle.Options.SystemTags.Has(stats.TagGroup) {
+	if r.Bundle.Options.SystemTags.Has(metrics.TagGroup) {
 		vu.state.Tags.Set("group", group.Path)
 	}
 	vu.state.Group = group
@@ -593,7 +595,7 @@ type VU struct {
 	Console *console
 	BPool   *bpool.BufferPool
 
-	Samples chan<- stats.SampleContainer
+	Samples chan<- metrics.SampleContainer
 
 	setupData goja.Value
 
@@ -650,16 +652,16 @@ func (u *VU) Activate(params *lib.VUActivationParams) lib.ActiveVU {
 	for k, v := range params.Tags {
 		u.state.Tags.Set(k, v)
 	}
-	if opts.SystemTags.Has(stats.TagVU) {
+	if opts.SystemTags.Has(metrics.TagVU) {
 		u.state.Tags.Set("vu", strconv.FormatUint(u.ID, 10))
 	}
-	if opts.SystemTags.Has(stats.TagIter) {
+	if opts.SystemTags.Has(metrics.TagIter) {
 		u.state.Tags.Set("iter", strconv.FormatInt(u.iteration, 10))
 	}
-	if opts.SystemTags.Has(stats.TagGroup) {
+	if opts.SystemTags.Has(metrics.TagGroup) {
 		u.state.Tags.Set("group", u.state.Group.Path)
 	}
-	if opts.SystemTags.Has(stats.TagScenario) {
+	if opts.SystemTags.Has(metrics.TagScenario) {
 		u.state.Tags.Set("scenario", params.Scenario)
 	}
 
@@ -749,7 +751,7 @@ func (u *ActiveVU) RunOnce() error {
 	if err != nil {
 		var x *goja.InterruptedError
 		if errors.As(err, &x) {
-			if v, ok := x.Value().(*common.InterruptError); ok {
+			if v, ok := x.Value().(*errext.InterruptError); ok {
 				v.Reason = x.Error()
 				err = v
 			}
@@ -784,34 +786,20 @@ func (u *VU) runFn(
 	}
 
 	opts := &u.Runner.Bundle.Options
-	if opts.SystemTags.Has(stats.TagIter) {
+	if opts.SystemTags.Has(metrics.TagIter) {
 		u.state.Tags.Set("iter", strconv.FormatInt(u.state.Iteration, 10))
 	}
 
 	startTime := time.Now()
 
 	if u.moduleVUImpl.eventLoop == nil {
-		u.moduleVUImpl.eventLoop = newEventLoop(u.moduleVUImpl)
+		u.moduleVUImpl.eventLoop = eventloop.New(u.moduleVUImpl)
 	}
-	err = u.moduleVUImpl.eventLoop.start(func() (err error) {
-		// here the returned value purposefully shadows the external one as they can be different
-		defer func() {
-			if r := recover(); r != nil {
-				gojaStack := u.Runtime.CaptureCallStack(20, nil)
-				err = fmt.Errorf("a panic occurred in VU code but was caught: %s", r)
-				// TODO figure out how to use PanicLevel without panicing .. this might require changing
-				// the logger we use see
-				// https://github.com/sirupsen/logrus/issues/1028
-				// https://github.com/sirupsen/logrus/issues/993
-				b := new(bytes.Buffer)
-				for _, s := range gojaStack {
-					s.Write(b)
-				}
-				u.state.Logger.Log(logrus.ErrorLevel, "panic: ", r, "\n", string(debug.Stack()), "\nGoja stack:\n", b.String())
-			}
-		}()
-		v, err = fn(goja.Undefined(), args...) // Actually run the JS script
-		return err
+	err = common.RunWithPanicCatching(u.state.Logger, u.Runtime, func() error {
+		return u.moduleVUImpl.eventLoop.Start(func() (err error) {
+			v, err = fn(goja.Undefined(), args...) // Actually run the JS script
+			return err
+		})
 	})
 
 	select {
@@ -823,7 +811,7 @@ func (u *VU) runFn(
 
 	if cancel != nil {
 		cancel()
-		u.moduleVUImpl.eventLoop.waitOnRegistered()
+		u.moduleVUImpl.eventLoop.WaitOnRegistered()
 	}
 	endTime := time.Now()
 	var exception *goja.Exception
@@ -835,7 +823,7 @@ func (u *VU) runFn(
 		u.Transport.CloseIdleConnections()
 	}
 
-	sampleTags := stats.NewSampleTags(u.state.CloneTags())
+	sampleTags := metrics.NewSampleTags(u.state.CloneTags())
 	u.state.Samples <- u.Dialer.GetTrail(
 		startTime, endTime, isFullIteration, isDefault, sampleTags, u.Runner.builtinMetrics)
 
@@ -884,6 +872,6 @@ func (s *scriptException) Hint() string {
 	return "script exception"
 }
 
-func (s *scriptException) ExitCode() errext.ExitCode {
+func (s *scriptException) ExitCode() exitcodes.ExitCode {
 	return exitcodes.ScriptException
 }

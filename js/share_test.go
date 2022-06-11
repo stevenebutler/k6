@@ -30,9 +30,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/lib/testutils"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 )
 
 func TestNewSharedArrayIntegration(t *testing.T) {
@@ -85,7 +84,12 @@ exports.default = function() {
 
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	r2, err := NewFromArchive(logger, r1.MakeArchive(), lib.RuntimeOptions{}, builtinMetrics, registry)
+	r2, err := NewFromArchive(
+		&lib.RuntimeState{
+			Logger:         logger,
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+		}, r1.MakeArchive())
 	require.NoError(t, err)
 	entries = hook.Drain()
 	require.Len(t, entries, 1)
@@ -97,7 +101,7 @@ exports.default = function() {
 		r := r
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			samples := make(chan stats.SampleContainer, 100)
+			samples := make(chan metrics.SampleContainer, 100)
 			initVU, err := r.NewVU(1, 1, samples)
 			require.NoError(t, err)
 

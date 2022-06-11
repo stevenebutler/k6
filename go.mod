@@ -8,13 +8,13 @@ require (
 	github.com/PuerkitoBio/goquery v1.8.0
 	github.com/Soontao/goHttpDigestClient v0.0.0-20170320082612-6d28bb1415c5
 	github.com/andybalholm/brotli v1.0.4
-	github.com/dop251/goja v0.0.0-20220214123719-b09a6bfa842f
+	github.com/dop251/goja v0.0.0-20220516123900-4418d4575a41
 	github.com/fatih/color v1.13.0
 	github.com/golang/protobuf v1.5.2
 	github.com/gorilla/websocket v1.5.0
 	github.com/influxdata/influxdb1-client v0.0.0-20190402204710-8ff2fc3824fc
 	github.com/jhump/protoreflect v1.12.0
-	github.com/klauspost/compress v1.15.1
+	github.com/klauspost/compress v1.15.5
 	github.com/mailru/easyjson v0.7.7
 	github.com/mattn/go-colorable v0.1.12
 	github.com/mattn/go-isatty v0.0.14
@@ -28,16 +28,16 @@ require (
 	github.com/spf13/cobra v1.4.0
 	github.com/spf13/pflag v1.0.5
 	github.com/stretchr/testify v1.7.1
-	github.com/tidwall/gjson v1.14.0
+	github.com/tidwall/gjson v1.14.1
 	github.com/tidwall/pretty v1.2.0
-	golang.org/x/crypto v0.0.0-20220315160706-3147a52a75dd
-	golang.org/x/net v0.0.0-20220225172249-27dd8689420f
-	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211
-	golang.org/x/time v0.0.0-20220224211638-0e9765cccd65
-	google.golang.org/grpc v1.45.0
-	google.golang.org/protobuf v1.26.0
+	golang.org/x/crypto v0.0.0-20220525230936-793ad666bf5e
+	golang.org/x/net v0.0.0-20220531201128-c960675eff93
+	golang.org/x/term v0.0.0-20220526004731-065cf7ba2467
+	golang.org/x/time v0.0.0-20220411224347-583f2d630306
+	google.golang.org/grpc v1.47.0
+	google.golang.org/protobuf v1.27.1
 	gopkg.in/guregu/null.v3 v3.3.0
-	gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -51,7 +51,7 @@ require (
 	github.com/onsi/ginkgo v1.14.0 // indirect
 	github.com/onsi/gomega v1.10.1 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
-	golang.org/x/sys v0.0.0-20211216021012-1d35b9e2eb4e // indirect
+	golang.org/x/sys v0.0.0-20220520151302-bc2c85ada10a // indirect
 	golang.org/x/text v0.3.7 // indirect
 	google.golang.org/genproto v0.0.0-20200903010400-9bfcb5116336 // indirect
 )

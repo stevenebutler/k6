@@ -32,9 +32,8 @@ import (
 	"gopkg.in/guregu/null.v3"
 
 	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/lib/types"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 )
 
 func getTestPerVUIterationsConfig() PerVUIterationsConfig {
@@ -52,7 +51,9 @@ func TestPerVUIterationsRun(t *testing.T) {
 	var result sync.Map
 	et, err := lib.NewExecutionTuple(nil, nil)
 	require.NoError(t, err)
-	es := lib.NewExecutionState(lib.Options{}, et, 10, 50)
+	registry := metrics.NewRegistry()
+	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
+	es := lib.NewExecutionState(lib.Options{}, et, builtinMetrics, 10, 50)
 	ctx, cancel, executor, _ := setupExecutor(
 		t, getTestPerVUIterationsConfig(), es,
 		simpleRunner(func(ctx context.Context, state *lib.State) error {
@@ -62,10 +63,8 @@ func TestPerVUIterationsRun(t *testing.T) {
 		}),
 	)
 	defer cancel()
-	engineOut := make(chan stats.SampleContainer, 1000)
-	registry := metrics.NewRegistry()
-	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	err = executor.Run(ctx, engineOut, builtinMetrics)
+	engineOut := make(chan metrics.SampleContainer, 1000)
+	err = executor.Run(ctx, engineOut)
 	require.NoError(t, err)
 
 	var totalIters uint64
@@ -88,7 +87,9 @@ func TestPerVUIterationsRunVariableVU(t *testing.T) {
 	)
 	et, err := lib.NewExecutionTuple(nil, nil)
 	require.NoError(t, err)
-	es := lib.NewExecutionState(lib.Options{}, et, 10, 50)
+	registry := metrics.NewRegistry()
+	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
+	es := lib.NewExecutionState(lib.Options{}, et, builtinMetrics, 10, 50)
 	ctx, cancel, executor, _ := setupExecutor(
 		t, getTestPerVUIterationsConfig(), es,
 		simpleRunner(func(ctx context.Context, state *lib.State) error {
@@ -101,10 +102,8 @@ func TestPerVUIterationsRunVariableVU(t *testing.T) {
 		}),
 	)
 	defer cancel()
-	engineOut := make(chan stats.SampleContainer, 1000)
-	registry := metrics.NewRegistry()
-	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	err = executor.Run(ctx, engineOut, builtinMetrics)
+	engineOut := make(chan metrics.SampleContainer, 1000)
+	err = executor.Run(ctx, engineOut)
 	require.NoError(t, err)
 
 	val, ok := result.Load(slowVUID)
@@ -138,7 +137,9 @@ func TestPerVuIterationsEmitDroppedIterations(t *testing.T) {
 		MaxDuration: types.NullDurationFrom(1 * time.Second),
 	}
 
-	es := lib.NewExecutionState(lib.Options{}, et, 10, 50)
+	registry := metrics.NewRegistry()
+	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
+	es := lib.NewExecutionState(lib.Options{}, et, builtinMetrics, 10, 50)
 	ctx, cancel, executor, logHook := setupExecutor(
 		t, config, es,
 		simpleRunner(func(ctx context.Context, _ *lib.State) error {
@@ -148,10 +149,8 @@ func TestPerVuIterationsEmitDroppedIterations(t *testing.T) {
 		}),
 	)
 	defer cancel()
-	engineOut := make(chan stats.SampleContainer, 1000)
-	registry := metrics.NewRegistry()
-	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	err = executor.Run(ctx, engineOut, builtinMetrics)
+	engineOut := make(chan metrics.SampleContainer, 1000)
+	err = executor.Run(ctx, engineOut)
 	require.NoError(t, err)
 	assert.Empty(t, logHook.Drain())
 	assert.Equal(t, int64(5), count)

@@ -31,9 +31,8 @@ import (
 	"gopkg.in/guregu/null.v3"
 
 	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/lib/types"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 	"go.k6.io/k6/ui/pb"
 )
 
@@ -100,11 +99,11 @@ func (vlvc RampingVUsConfig) GetDescription(et *lib.ExecutionTuple) string {
 func (vlvc RampingVUsConfig) Validate() []error {
 	errors := vlvc.BaseConfig.Validate()
 	if vlvc.StartVUs.Int64 < 0 {
-		errors = append(errors, fmt.Errorf("the number of start VUs shouldn't be negative"))
+		errors = append(errors, fmt.Errorf("the number of start VUs can't be negative"))
 	}
 
 	if getStagesUnscaledMaxTarget(vlvc.StartVUs.Int64, vlvc.Stages) <= 0 {
-		errors = append(errors, fmt.Errorf("either startVUs or one of the stages' target value should be greater than 0"))
+		errors = append(errors, fmt.Errorf("either startVUs or one of the stages' target values must be greater than 0"))
 	}
 
 	return append(errors, validateStages(vlvc.Stages)...)
@@ -507,7 +506,7 @@ func (vlv *RampingVUs) Init(_ context.Context) error {
 
 // Run constantly loops through as many iterations as possible on a variable
 // number of VUs for the specified stages.
-func (vlv *RampingVUs) Run(ctx context.Context, _ chan<- stats.SampleContainer, _ *metrics.BuiltinMetrics) error {
+func (vlv *RampingVUs) Run(ctx context.Context, _ chan<- metrics.SampleContainer) error {
 	regularDuration, isFinal := lib.GetEndOffset(vlv.rawSteps)
 	if !isFinal {
 		return fmt.Errorf("%s expected raw end offset at %s to be final", vlv.config.GetName(), regularDuration)
@@ -516,10 +515,14 @@ func (vlv *RampingVUs) Run(ctx context.Context, _ chan<- stats.SampleContainer, 
 	if !isFinal {
 		return fmt.Errorf("%s expected graceful end offset at %s to be final", vlv.config.GetName(), maxDuration)
 	}
+	waitOnProgressChannel := make(chan struct{})
 	startTime, maxDurationCtx, regularDurationCtx, cancel := getDurationContexts(
 		ctx, regularDuration, maxDuration-regularDuration,
 	)
-	defer cancel()
+	defer func() {
+		cancel()
+		<-waitOnProgressChannel
+	}()
 
 	maxVUs := lib.GetMaxPlannedVUs(vlv.gracefulSteps)
 
@@ -548,8 +551,10 @@ func (vlv *RampingVUs) Run(ctx context.Context, _ chan<- stats.SampleContainer, 
 		ProgressFn: progressFn,
 	})
 	vlv.progress.Modify(pb.WithProgress(progressFn))
-	go trackProgress(ctx, maxDurationCtx, regularDurationCtx, vlv, progressFn)
-
+	go func() {
+		trackProgress(ctx, maxDurationCtx, regularDurationCtx, vlv, progressFn)
+		close(waitOnProgressChannel)
+	}()
 	defer runState.wg.Wait()
 	// this will populate stopped VUs and run runLoopsIfPossible on each VU
 	// handle in a new goroutine

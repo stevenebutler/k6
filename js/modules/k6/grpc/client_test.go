@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2020 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package grpc
 
 import (
@@ -25,21 +5,17 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"fmt"
 	"io/ioutil"
 	"net/url"
 	"os"
 	"runtime"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"google.golang.org/grpc/reflection"
-	reflectpb "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/descriptorpb"
 
 	"github.com/dop251/goja"
+	"github.com/golang/protobuf/ptypes/any"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
@@ -56,10 +32,11 @@ import (
 	"go.k6.io/k6/js/modulestest"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/fsext"
-	"go.k6.io/k6/lib/metrics"
+	"go.k6.io/k6/lib/netext/grpcext"
 	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/lib/testutils/httpmultibin"
-	"go.k6.io/k6/stats"
+	grpcanytesting "go.k6.io/k6/lib/testutils/httpmultibin/grpc_any_testing"
+	"go.k6.io/k6/metrics"
 )
 
 const isWindows = runtime.GOOS == "windows"
@@ -70,7 +47,7 @@ type codeBlock struct {
 	val        interface{}
 	err        string
 	windowsErr string
-	asserts    func(*testing.T, *httpmultibin.HTTPMultiBin, chan stats.SampleContainer, error)
+	asserts    func(*testing.T, *httpmultibin.HTTPMultiBin, chan metrics.SampleContainer, error)
 }
 
 type testcase struct {
@@ -88,7 +65,7 @@ func TestClient(t *testing.T) {
 		vuState *lib.State
 		env     *common.InitEnvironment
 		httpBin *httpmultibin.HTTPMultiBin
-		samples chan stats.SampleContainer
+		samples chan metrics.SampleContainer
 	}
 	setup := func(t *testing.T) testState {
 		t.Helper()
@@ -96,16 +73,16 @@ func TestClient(t *testing.T) {
 		root, err := lib.NewGroup("", nil)
 		require.NoError(t, err)
 		tb := httpmultibin.NewHTTPMultiBin(t)
-		samples := make(chan stats.SampleContainer, 1000)
+		samples := make(chan metrics.SampleContainer, 1000)
 		state := &lib.State{
 			Group:     root,
 			Dialer:    tb.Dialer,
 			TLSConfig: tb.TLSClientConfig,
 			Samples:   samples,
 			Options: lib.Options{
-				SystemTags: stats.NewSystemTagSet(
-					stats.TagName,
-					stats.TagURL,
+				SystemTags: metrics.NewSystemTagSet(
+					metrics.TagName,
+					metrics.TagURL,
 				),
 				UserAgent: null.StringFrom("k6-test"),
 			},
@@ -144,7 +121,7 @@ func TestClient(t *testing.T) {
 	assertMetricEmitted := func(
 		t *testing.T,
 		metricName string,
-		sampleContainers []stats.SampleContainer,
+		sampleContainers []metrics.SampleContainer,
 		url string,
 	) {
 		seenMetric := false
@@ -389,11 +366,59 @@ func TestClient(t *testing.T) {
 				client.connect("GRPCBIN_ADDR");
 				var resp = client.invoke("grpc.testing.TestService/EmptyCall", {})
 				if (resp.status !== grpc.StatusOK) {
-					throw new Error("unexpected error status: " + resp.status)
+					throw new Error("unexpected error: " + JSON.stringify(resp.error) + "or status: " + resp.status)
 				}`,
-				asserts: func(t *testing.T, rb *httpmultibin.HTTPMultiBin, samples chan stats.SampleContainer, _ error) {
-					samplesBuf := stats.GetBufferedSamples(samples)
+				asserts: func(t *testing.T, rb *httpmultibin.HTTPMultiBin, samples chan metrics.SampleContainer, _ error) {
+					samplesBuf := metrics.GetBufferedSamples(samples)
 					assertMetricEmitted(t, metrics.GRPCReqDurationName, samplesBuf, rb.Replacer.Replace("GRPCBIN_ADDR/grpc.testing.TestService/EmptyCall"))
+				},
+			},
+		},
+		{
+			name: "InvokeAnyProto",
+			initString: codeBlock{code: `
+				var client = new grpc.Client();
+				client.load([], "../../../../lib/testutils/httpmultibin/grpc_any_testing/any_test.proto");`},
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				tb.GRPCAnyStub.SumFunc = func(ctx context.Context, req *grpcanytesting.SumRequest) (*grpcanytesting.SumReply, error) {
+					var sumRequestData grpcanytesting.SumRequestData
+					if err := req.Data.UnmarshalTo(&sumRequestData); err != nil {
+						return nil, err
+					}
+
+					sumReplyData := &grpcanytesting.SumReplyData{
+						V:   sumRequestData.A + sumRequestData.B,
+						Err: "",
+					}
+					sumReply := &grpcanytesting.SumReply{
+						Data: &any.Any{},
+					}
+					if err := sumReply.Data.MarshalFrom(sumReplyData); err != nil {
+						return nil, err
+					}
+
+					return sumReply, nil
+				}
+			},
+			vuString: codeBlock{
+				code: `
+				client.connect("GRPCBIN_ADDR");
+				var resp = client.invoke("grpc.any.testing.AnyTestService/Sum",  {
+					data: {
+						"@type": "type.googleapis.com/grpc.any.testing.SumRequestData",
+						"a": 1,
+						"b": 2,
+					},
+				})
+				if (resp.status !== grpc.StatusOK) {
+					throw new Error("unexpected error: " + JSON.stringify(resp.error) + "or status: " + resp.status)
+				}
+				if (resp.message.data.v !== "3") {
+					throw new Error("unexpected resp message data")
+				}`,
+				asserts: func(t *testing.T, rb *httpmultibin.HTTPMultiBin, samples chan metrics.SampleContainer, _ error) {
+					samplesBuf := metrics.GetBufferedSamples(samples)
+					assertMetricEmitted(t, metrics.GRPCReqDurationName, samplesBuf, rb.Replacer.Replace("GRPCBIN_ADDR/grpc.any.testing.AnyTestService/Sum"))
 				},
 			},
 		},
@@ -465,8 +490,8 @@ func TestClient(t *testing.T) {
 				if (!resp.message || resp.message.username !== "" || resp.message.oauthScope !== "水") {
 					throw new Error("unexpected response message: " + JSON.stringify(resp.message))
 				}`,
-				asserts: func(t *testing.T, rb *httpmultibin.HTTPMultiBin, samples chan stats.SampleContainer, _ error) {
-					samplesBuf := stats.GetBufferedSamples(samples)
+				asserts: func(t *testing.T, rb *httpmultibin.HTTPMultiBin, samples chan metrics.SampleContainer, _ error) {
+					samplesBuf := metrics.GetBufferedSamples(samples)
 					assertMetricEmitted(t, metrics.GRPCReqDurationName, samplesBuf, rb.Replacer.Replace("GRPCBIN_ADDR/grpc.testing.TestService/UnaryCall"))
 				},
 			},
@@ -493,8 +518,8 @@ func TestClient(t *testing.T) {
 				if (!resp.error || resp.error.message !== "foobar" || resp.error.code !== 15) {
 					throw new Error("unexpected error object: " + JSON.stringify(resp.error.code))
 				}`,
-				asserts: func(t *testing.T, rb *httpmultibin.HTTPMultiBin, samples chan stats.SampleContainer, _ error) {
-					samplesBuf := stats.GetBufferedSamples(samples)
+				asserts: func(t *testing.T, rb *httpmultibin.HTTPMultiBin, samples chan metrics.SampleContainer, _ error) {
+					samplesBuf := metrics.GetBufferedSamples(samples)
 					assertMetricEmitted(t, metrics.GRPCReqDurationName, samplesBuf, rb.Replacer.Replace("GRPCBIN_ADDR/grpc.testing.TestService/EmptyCall"))
 				},
 			},
@@ -523,8 +548,8 @@ func TestClient(t *testing.T) {
 				if (!resp.headers || !resp.headers["foo"] || resp.headers["foo"][0] !== "bar") {
 					throw new Error("unexpected headers object: " + JSON.stringify(resp.trailers))
 				}`,
-				asserts: func(t *testing.T, rb *httpmultibin.HTTPMultiBin, samples chan stats.SampleContainer, _ error) {
-					samplesBuf := stats.GetBufferedSamples(samples)
+				asserts: func(t *testing.T, rb *httpmultibin.HTTPMultiBin, samples chan metrics.SampleContainer, _ error) {
+					samplesBuf := metrics.GetBufferedSamples(samples)
 					assertMetricEmitted(t, metrics.GRPCReqDurationName, samplesBuf, rb.Replacer.Replace("GRPCBIN_ADDR/grpc.testing.TestService/EmptyCall"))
 				},
 			},
@@ -553,8 +578,8 @@ func TestClient(t *testing.T) {
 				if (!resp.trailers || !resp.trailers["foo"] || resp.trailers["foo"][0] !== "bar") {
 					throw new Error("unexpected trailers object: " + JSON.stringify(resp.trailers))
 				}`,
-				asserts: func(t *testing.T, rb *httpmultibin.HTTPMultiBin, samples chan stats.SampleContainer, _ error) {
-					samplesBuf := stats.GetBufferedSamples(samples)
+				asserts: func(t *testing.T, rb *httpmultibin.HTTPMultiBin, samples chan metrics.SampleContainer, _ error) {
+					samplesBuf := metrics.GetBufferedSamples(samples)
 					assertMetricEmitted(t, metrics.GRPCReqDurationName, samplesBuf, rb.Replacer.Replace("GRPCBIN_ADDR/grpc.testing.TestService/EmptyCall"))
 				},
 			},
@@ -789,7 +814,7 @@ func TestDebugStat(t *testing.T) {
 			logger := logrus.New()
 			logger.Out = &b
 
-			debugStat(tt.stat, logger.WithField("source", "test"), "full")
+			grpcext.DebugStat(logger.WithField("source", "test"), tt.stat, "full")
 			assert.Contains(t, b.String(), tt.expected)
 		})
 	}
@@ -823,104 +848,4 @@ func TestClientInvokeHeadersDeprecated(t *testing.T) {
 	entries := logHook.Drain()
 	require.Len(t, entries, 1)
 	require.Contains(t, entries[0].Message, "headers property is deprecated")
-}
-
-func TestResolveFileDescriptors(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name                string
-		pkgs                []string
-		services            []string
-		expectedDescriptors int
-	}{
-		{
-			name:                "SuccessSamePackage",
-			pkgs:                []string{"mypkg"},
-			services:            []string{"Service1", "Service2", "Service3"},
-			expectedDescriptors: 3,
-		},
-		{
-			name:                "SuccessMultiPackages",
-			pkgs:                []string{"mypkg1", "mypkg2", "mypkg3"},
-			services:            []string{"Service", "Service", "Service"},
-			expectedDescriptors: 3,
-		},
-		{
-			name:                "DeduplicateServices",
-			pkgs:                []string{"mypkg1"},
-			services:            []string{"Service1", "Service2", "Service1"},
-			expectedDescriptors: 2,
-		},
-		{
-			name:                "NoServices",
-			services:            []string{},
-			expectedDescriptors: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			var (
-				lsr  = &reflectpb.ListServiceResponse{}
-				mock = &getServiceFileDescriptorMock{}
-			)
-			for i, service := range tt.services {
-				// if only one package is defined then
-				// the package is the same for every service
-				pkg := tt.pkgs[0]
-				if len(tt.pkgs) > 1 {
-					pkg = tt.pkgs[i]
-				}
-
-				lsr.Service = append(lsr.Service, &reflectpb.ServiceResponse{
-					Name: fmt.Sprintf("%s.%s", pkg, service),
-				})
-				mock.pkgs = append(mock.pkgs, pkg)
-				mock.names = append(mock.names, service)
-			}
-
-			fdset, err := resolveServiceFileDescriptors(mock, lsr)
-			require.NoError(t, err)
-			assert.Len(t, fdset.File, tt.expectedDescriptors)
-		})
-	}
-}
-
-type getServiceFileDescriptorMock struct {
-	nreqs int64
-	pkgs  []string
-	names []string
-}
-
-func (m *getServiceFileDescriptorMock) Send(req *reflectpb.ServerReflectionRequest) error {
-	// TODO: check that the sent message is expected,
-	// otherwise return an error
-	return nil
-}
-
-func (m *getServiceFileDescriptorMock) Recv() (*reflectpb.ServerReflectionResponse, error) {
-	n := atomic.AddInt64(&m.nreqs, 1)
-	ptr := func(s string) (sptr *string) {
-		return &s
-	}
-	index := n - 1
-	fdp := &descriptorpb.FileDescriptorProto{
-		Package: ptr(m.pkgs[index]),
-		Name:    ptr(m.names[index]),
-	}
-	b, err := proto.Marshal(fdp)
-	if err != nil {
-		return nil, err
-	}
-	srr := &reflectpb.ServerReflectionResponse{
-		MessageResponse: &reflectpb.ServerReflectionResponse_FileDescriptorResponse{
-			FileDescriptorResponse: &reflectpb.FileDescriptorResponse{
-				FileDescriptorProto: [][]byte{b},
-			},
-		},
-	}
-	return srr, nil
 }

@@ -36,10 +36,9 @@ import (
 	"go.k6.io/k6/js"
 	"go.k6.io/k6/js/modules"
 	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/loader"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 )
 
 type CheckModule struct {
@@ -79,21 +78,23 @@ func TestNewJSRunnerWithCustomModule(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	runner, err := js.New(
-		logger,
+		&lib.RuntimeState{
+			Logger:         logger,
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+			RuntimeOptions: rtOptions,
+		},
 		&loader.SourceData{
 			URL:  &url.URL{Path: "blah", Scheme: "file"},
 			Data: []byte(script),
 		},
 		map[string]afero.Fs{"file": afero.NewMemMapFs(), "https": afero.NewMemMapFs()},
-		rtOptions,
-		builtinMetrics,
-		registry,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, checkModule.initCtxCalled, 1)
 	assert.Equal(t, checkModule.vuCtxCalled, 0)
 
-	vu, err := runner.NewVU(1, 1, make(chan stats.SampleContainer, 100))
+	vu, err := runner.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
 	require.NoError(t, err)
 	assert.Equal(t, checkModule.initCtxCalled, 2)
 	assert.Equal(t, checkModule.vuCtxCalled, 0)
@@ -113,11 +114,17 @@ func TestNewJSRunnerWithCustomModule(t *testing.T) {
 	assert.Equal(t, checkModule.initCtxCalled, 2) // shouldn't change, we're not executing the init context again
 	assert.Equal(t, checkModule.vuCtxCalled, 2)
 
-	runnerFromArc, err := js.NewFromArchive(logger, arc, rtOptions, builtinMetrics, registry)
+	runnerFromArc, err := js.NewFromArchive(
+		&lib.RuntimeState{
+			Logger:         logger,
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+			RuntimeOptions: rtOptions,
+		}, arc)
 	require.NoError(t, err)
 	assert.Equal(t, checkModule.initCtxCalled, 3) // changes because we need to get the exported functions
 	assert.Equal(t, checkModule.vuCtxCalled, 2)
-	vuFromArc, err := runnerFromArc.NewVU(2, 2, make(chan stats.SampleContainer, 100))
+	vuFromArc, err := runnerFromArc.NewVU(2, 2, make(chan metrics.SampleContainer, 100))
 	require.NoError(t, err)
 	assert.Equal(t, checkModule.initCtxCalled, 4)
 	assert.Equal(t, checkModule.vuCtxCalled, 2)

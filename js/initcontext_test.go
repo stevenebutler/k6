@@ -40,11 +40,10 @@ import (
 
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/consts"
-	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/lib/netext"
 	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/lib/types"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 )
 
 func TestInitContextRequire(t *testing.T) {
@@ -405,7 +404,7 @@ func TestRequestWithBinaryFile(t *testing.T) {
 			)).DialContext,
 		},
 		BPool:          bpool.NewBufferPool(1),
-		Samples:        make(chan stats.SampleContainer, 500),
+		Samples:        make(chan metrics.SampleContainer, 500),
 		BuiltinMetrics: builtinMetrics,
 		Tags:           lib.NewTagMap(nil),
 	}
@@ -553,7 +552,7 @@ func TestRequestWithMultipleBinaryFiles(t *testing.T) {
 			)).DialContext,
 		},
 		BPool:          bpool.NewBufferPool(1),
-		Samples:        make(chan stats.SampleContainer, 500),
+		Samples:        make(chan metrics.SampleContainer, 500),
 		BuiltinMetrics: builtinMetrics,
 		Tags:           lib.NewTagMap(nil),
 	}

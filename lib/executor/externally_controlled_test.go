@@ -50,7 +50,7 @@ func TestExternallyControlledRun(t *testing.T) {
 
 	et, err := lib.NewExecutionTuple(nil, nil)
 	require.NoError(t, err)
-	es := lib.NewExecutionState(lib.Options{}, et, 10, 50)
+	es := lib.NewExecutionState(lib.Options{}, et, nil, 10, 50)
 
 	doneIters := new(uint64)
 	ctx, cancel, executor, _ := setupExecutor(
@@ -72,7 +72,7 @@ func TestExternallyControlledRun(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		es.MarkStarted()
-		errCh <- executor.Run(ctx, nil, nil)
+		errCh <- executor.Run(ctx, nil)
 		es.MarkEnded()
 		close(doneCh)
 	}()
@@ -116,7 +116,7 @@ func TestExternallyControlledRun(t *testing.T) {
 						"invalid configuration supplied: the number of active VUs (15)"+
 							" must be less than or equal to the number of maxVUs (10)")
 					updateConfig(-1, 10,
-						"invalid configuration supplied: the number of VUs shouldn't be negative")
+						"invalid configuration supplied: the number of VUs can't be negative")
 				}
 				ticks++
 			case <-doneCh:

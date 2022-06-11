@@ -39,30 +39,34 @@ import (
 	"go.k6.io/k6/js"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/executor"
-	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/lib/testutils/httpmultibin"
 	"go.k6.io/k6/lib/testutils/minirunner"
 	"go.k6.io/k6/lib/testutils/mockoutput"
 	"go.k6.io/k6/lib/types"
 	"go.k6.io/k6/loader"
+	"go.k6.io/k6/metrics"
 	"go.k6.io/k6/output"
-	"go.k6.io/k6/stats"
 )
 
 const isWindows = runtime.GOOS == "windows"
 
+// TODO: completely rewrite all of these tests
+
+type testStruct struct {
+	engine    *Engine
+	run       func() error
+	runCancel func()
+	wait      func()
+}
+
 // Wrapper around NewEngine that applies a logger and manages the options.
-func newTestEngine( //nolint:golint
-	t *testing.T, runCtx context.Context, runner lib.Runner, outputs []output.Output, opts lib.Options,
-) (engine *Engine, run func() error, wait func()) {
+func newTestEngineWithRegistry( //nolint:golint
+	t *testing.T, runTimeout *time.Duration, runner lib.Runner, outputs []output.Output, opts lib.Options,
+	registry *metrics.Registry,
+) *testStruct {
 	if runner == nil {
 		runner = &minirunner.MiniRunner{}
-	}
-	globalCtx, globalCancel := context.WithCancel(context.Background())
-	var runCancel func()
-	if runCtx == nil {
-		runCtx, runCancel = context.WithCancel(globalCtx)
 	}
 
 	logger := logrus.New()
@@ -75,29 +79,44 @@ func newTestEngine( //nolint:golint
 
 	require.NoError(t, runner.SetOptions(newOpts))
 
-	execScheduler, err := local.NewExecutionScheduler(runner, logger)
-	require.NoError(t, err)
-
-	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	engine, err = NewEngine(execScheduler, opts, lib.RuntimeOptions{}, outputs, logger, builtinMetrics)
+	execScheduler, err := local.NewExecutionScheduler(runner, builtinMetrics, logger)
 	require.NoError(t, err)
 
+	engine, err := NewEngine(execScheduler, opts, lib.RuntimeOptions{}, outputs, logger, registry)
+	require.NoError(t, err)
+	require.NoError(t, engine.OutputManager.StartOutputs())
+
+	globalCtx, globalCancel := context.WithCancel(context.Background())
+	var runCancel func()
+	var runCtx context.Context
+	if runTimeout != nil {
+		runCtx, runCancel = context.WithTimeout(globalCtx, *runTimeout)
+	} else {
+		runCtx, runCancel = context.WithCancel(globalCtx)
+	}
 	run, waitFn, err := engine.Init(globalCtx, runCtx)
 	require.NoError(t, err)
 
-	return engine, run, func() {
-		if runCancel != nil {
-			runCancel()
-		}
-		globalCancel()
-		waitFn()
+	var test *testStruct
+	test = &testStruct{
+		engine:    engine,
+		run:       run,
+		runCancel: runCancel,
+		wait: func() {
+			test.runCancel()
+			globalCancel()
+			waitFn()
+			engine.OutputManager.StopOutputs()
+		},
 	}
+	return test
 }
 
-func TestNewEngine(t *testing.T) {
-	t.Parallel()
-	newTestEngine(t, nil, nil, nil, lib.Options{})
+func newTestEngine(
+	t *testing.T, runTimeout *time.Duration, runner lib.Runner, outputs []output.Output, opts lib.Options,
+) *testStruct {
+	return newTestEngineWithRegistry(t, runTimeout, runner, outputs, opts, metrics.NewRegistry())
 }
 
 func TestEngineRun(t *testing.T) {
@@ -107,7 +126,7 @@ func TestEngineRun(t *testing.T) {
 		t.Parallel()
 		done := make(chan struct{})
 		runner := &minirunner.MiniRunner{
-			Fn: func(ctx context.Context, _ *lib.State, _ chan<- stats.SampleContainer) error {
+			Fn: func(ctx context.Context, _ *lib.State, _ chan<- metrics.SampleContainer) error {
 				<-ctx.Done()
 				close(done)
 				return nil
@@ -115,57 +134,56 @@ func TestEngineRun(t *testing.T) {
 		}
 
 		duration := 100 * time.Millisecond
-		ctx, cancel := context.WithTimeout(context.Background(), duration)
-		defer cancel()
-
-		_, run, wait := newTestEngine(t, ctx, runner, nil, lib.Options{})
-		defer wait()
+		test := newTestEngine(t, &duration, runner, nil, lib.Options{})
+		defer test.wait()
 
 		startTime := time.Now()
-		assert.NoError(t, run())
+		assert.NoError(t, test.run())
 		assert.WithinDuration(t, startTime.Add(duration), time.Now(), 100*time.Millisecond)
 		<-done
 	})
 	t.Run("exits with executor", func(t *testing.T) {
 		t.Parallel()
-		e, run, wait := newTestEngine(t, nil, nil, nil, lib.Options{
+		test := newTestEngine(t, nil, nil, nil, lib.Options{
 			VUs:        null.IntFrom(10),
 			Iterations: null.IntFrom(100),
 		})
-		defer wait()
-		assert.NoError(t, run())
-		assert.Equal(t, uint64(100), e.ExecutionScheduler.GetState().GetFullIterationCount())
+		defer test.wait()
+		assert.NoError(t, test.run())
+		assert.Equal(t, uint64(100), test.engine.ExecutionScheduler.GetState().GetFullIterationCount())
 	})
 	// Make sure samples are discarded after context close (using "cutoff" timestamp in local.go)
 	t.Run("collects samples", func(t *testing.T) {
 		t.Parallel()
-		testMetric := stats.New("test_metric", stats.Trend)
+
+		registry := metrics.NewRegistry()
+		testMetric, err := registry.NewMetric("test_metric", metrics.Trend)
+		require.NoError(t, err)
 
 		signalChan := make(chan interface{})
 
 		runner := &minirunner.MiniRunner{
-			Fn: func(ctx context.Context, _ *lib.State, out chan<- stats.SampleContainer) error {
-				stats.PushIfNotDone(ctx, out, stats.Sample{Metric: testMetric, Time: time.Now(), Value: 1})
+			Fn: func(ctx context.Context, _ *lib.State, out chan<- metrics.SampleContainer) error {
+				metrics.PushIfNotDone(ctx, out, metrics.Sample{Metric: testMetric, Time: time.Now(), Value: 1})
 				close(signalChan)
 				<-ctx.Done()
-				stats.PushIfNotDone(ctx, out, stats.Sample{Metric: testMetric, Time: time.Now(), Value: 1})
+				metrics.PushIfNotDone(ctx, out, metrics.Sample{Metric: testMetric, Time: time.Now(), Value: 1})
 				return nil
 			},
 		}
 
 		mockOutput := mockoutput.New()
-		ctx, cancel := context.WithCancel(context.Background())
-		_, run, wait := newTestEngine(t, ctx, runner, []output.Output{mockOutput}, lib.Options{
+		test := newTestEngineWithRegistry(t, nil, runner, []output.Output{mockOutput}, lib.Options{
 			VUs:        null.IntFrom(1),
 			Iterations: null.IntFrom(1),
-		})
+		}, registry)
 
 		errC := make(chan error)
-		go func() { errC <- run() }()
+		go func() { errC <- test.run() }()
 		<-signalChan
-		cancel()
+		test.runCancel()
 		assert.NoError(t, <-errC)
-		wait()
+		test.wait()
 
 		found := 0
 		for _, s := range mockOutput.Samples {
@@ -181,63 +199,62 @@ func TestEngineRun(t *testing.T) {
 
 func TestEngineAtTime(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	_, run, wait := newTestEngine(t, ctx, nil, nil, lib.Options{
+	test := newTestEngine(t, nil, nil, nil, lib.Options{
 		VUs:      null.IntFrom(2),
 		Duration: types.NullDurationFrom(20 * time.Second),
 	})
-	defer wait()
+	defer test.wait()
 
-	assert.NoError(t, run())
+	assert.NoError(t, test.run())
 }
 
 func TestEngineStopped(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	e, run, wait := newTestEngine(t, ctx, nil, nil, lib.Options{
+	test := newTestEngine(t, nil, nil, nil, lib.Options{
 		VUs:      null.IntFrom(1),
 		Duration: types.NullDurationFrom(20 * time.Second),
 	})
-	defer wait()
+	defer test.wait()
 
-	assert.NoError(t, run())
-	assert.Equal(t, false, e.IsStopped(), "engine should be running")
-	e.Stop()
-	assert.Equal(t, true, e.IsStopped(), "engine should be stopped")
-	e.Stop() // test that a second stop doesn't panic
+	assert.NoError(t, test.run())
+	assert.Equal(t, false, test.engine.IsStopped(), "engine should be running")
+	test.engine.Stop()
+	assert.Equal(t, true, test.engine.IsStopped(), "engine should be stopped")
+	test.engine.Stop() // test that a second stop doesn't panic
 }
 
 func TestEngineOutput(t *testing.T) {
 	t.Parallel()
-	testMetric := stats.New("test_metric", stats.Trend)
+
+	registry := metrics.NewRegistry()
+	testMetric, err := registry.NewMetric("test_metric", metrics.Trend)
+	require.NoError(t, err)
 
 	runner := &minirunner.MiniRunner{
-		Fn: func(ctx context.Context, _ *lib.State, out chan<- stats.SampleContainer) error {
-			out <- stats.Sample{Metric: testMetric}
+		Fn: func(_ context.Context, _ *lib.State, out chan<- metrics.SampleContainer) error {
+			out <- metrics.Sample{Metric: testMetric}
 			return nil
 		},
 	}
 
 	mockOutput := mockoutput.New()
-	e, run, wait := newTestEngine(t, nil, runner, []output.Output{mockOutput}, lib.Options{
+	test := newTestEngineWithRegistry(t, nil, runner, []output.Output{mockOutput}, lib.Options{
 		VUs:        null.IntFrom(1),
 		Iterations: null.IntFrom(1),
-	})
+	}, registry)
 
-	assert.NoError(t, run())
-	wait()
+	assert.NoError(t, test.run())
+	test.wait()
 
-	cSamples := []stats.Sample{}
+	cSamples := []metrics.Sample{}
 	for _, sample := range mockOutput.Samples {
 		if sample.Metric == testMetric {
 			cSamples = append(cSamples, sample)
 		}
 	}
-	metric := e.Metrics["test_metric"]
+	metric := test.engine.MetricsEngine.ObservedMetrics["test_metric"]
 	if assert.NotNil(t, metric) {
-		sink := metric.Sink.(*stats.TrendSink)
+		sink := metric.Sink.(*metrics.TrendSink) // nolint: forcetypeassert
 		if assert.NotNil(t, sink) {
 			numOutputSamples := len(cSamples)
 			numEngineSamples := len(sink.Values)
@@ -248,99 +265,118 @@ func TestEngineOutput(t *testing.T) {
 
 func TestEngine_processSamples(t *testing.T) {
 	t.Parallel()
-	metric := stats.New("my_metric", stats.Gauge)
 
 	t.Run("metric", func(t *testing.T) {
 		t.Parallel()
-		e, _, wait := newTestEngine(t, nil, nil, nil, lib.Options{})
-		defer wait()
 
-		e.processSamples(
-			[]stats.SampleContainer{stats.Sample{Metric: metric, Value: 1.25, Tags: stats.IntoSampleTags(&map[string]string{"a": "1"})}},
+		registry := metrics.NewRegistry()
+		metric, err := registry.NewMetric("my_metric", metrics.Gauge)
+		require.NoError(t, err)
+
+		test := newTestEngineWithRegistry(t, nil, nil, nil, lib.Options{}, registry)
+
+		test.engine.OutputManager.AddMetricSamples(
+			[]metrics.SampleContainer{metrics.Sample{Metric: metric, Value: 1.25, Tags: metrics.IntoSampleTags(&map[string]string{"a": "1"})}},
 		)
 
-		assert.IsType(t, &stats.GaugeSink{}, e.Metrics["my_metric"].Sink)
+		test.engine.Stop()
+		test.wait()
+
+		assert.IsType(t, &metrics.GaugeSink{}, test.engine.MetricsEngine.ObservedMetrics["my_metric"].Sink)
 	})
 	t.Run("submetric", func(t *testing.T) {
 		t.Parallel()
-		ths := stats.NewThresholds([]string{`value<2`})
+
+		registry := metrics.NewRegistry()
+		metric, err := registry.NewMetric("my_metric", metrics.Gauge)
+		require.NoError(t, err)
+
+		ths := metrics.NewThresholds([]string{`value<2`})
 		gotParseErr := ths.Parse()
 		require.NoError(t, gotParseErr)
 
-		e, _, wait := newTestEngine(t, nil, nil, nil, lib.Options{
-			Thresholds: map[string]stats.Thresholds{
+		test := newTestEngineWithRegistry(t, nil, nil, nil, lib.Options{
+			Thresholds: map[string]metrics.Thresholds{
 				"my_metric{a:1}": ths,
 			},
-		})
-		defer wait()
+		}, registry)
 
-		sms := e.submetrics["my_metric"]
-		assert.Len(t, sms, 1)
-		assert.Equal(t, "my_metric{a:1}", sms[0].Name)
-		assert.EqualValues(t, map[string]string{"a": "1"}, sms[0].Tags.CloneTags())
-
-		e.processSamples(
-			[]stats.SampleContainer{stats.Sample{Metric: metric, Value: 1.25, Tags: stats.IntoSampleTags(&map[string]string{"a": "1", "b": "2"})}},
+		test.engine.OutputManager.AddMetricSamples(
+			[]metrics.SampleContainer{metrics.Sample{Metric: metric, Value: 1.25, Tags: metrics.IntoSampleTags(&map[string]string{"a": "1", "b": "2"})}},
 		)
 
-		assert.IsType(t, &stats.GaugeSink{}, e.Metrics["my_metric"].Sink)
-		assert.IsType(t, &stats.GaugeSink{}, e.Metrics["my_metric{a:1}"].Sink)
+		test.engine.Stop()
+		test.wait()
+
+		assert.Len(t, test.engine.MetricsEngine.ObservedMetrics, 2)
+		sms := test.engine.MetricsEngine.ObservedMetrics["my_metric{a:1}"]
+		assert.EqualValues(t, map[string]string{"a": "1"}, sms.Sub.Tags.CloneTags())
+
+		assert.IsType(t, &metrics.GaugeSink{}, test.engine.MetricsEngine.ObservedMetrics["my_metric"].Sink)
+		assert.IsType(t, &metrics.GaugeSink{}, test.engine.MetricsEngine.ObservedMetrics["my_metric{a:1}"].Sink)
 	})
 }
 
 func TestEngineThresholdsWillAbort(t *testing.T) {
 	t.Parallel()
-	metric := stats.New("my_metric", stats.Gauge)
+
+	registry := metrics.NewRegistry()
+	metric, err := registry.NewMetric("my_metric", metrics.Gauge)
+	require.NoError(t, err)
 
 	// The incoming samples for the metric set it to 1.25. Considering
 	// the metric is of type Gauge, value > 1.25 should always fail, and
 	// trigger an abort.
-	ths := stats.NewThresholds([]string{"value>1.25"})
+	ths := metrics.NewThresholds([]string{"value>1.25"})
 	gotParseErr := ths.Parse()
 	require.NoError(t, gotParseErr)
 	ths.Thresholds[0].AbortOnFail = true
 
-	thresholds := map[string]stats.Thresholds{metric.Name: ths}
+	thresholds := map[string]metrics.Thresholds{metric.Name: ths}
 
-	e, _, wait := newTestEngine(t, nil, nil, nil, lib.Options{Thresholds: thresholds})
-	defer wait()
+	test := newTestEngineWithRegistry(t, nil, nil, nil, lib.Options{Thresholds: thresholds}, registry)
 
-	e.processSamples(
-		[]stats.SampleContainer{stats.Sample{Metric: metric, Value: 1.25, Tags: stats.IntoSampleTags(&map[string]string{"a": "1"})}},
+	test.engine.OutputManager.AddMetricSamples(
+		[]metrics.SampleContainer{metrics.Sample{Metric: metric, Value: 1.25, Tags: metrics.IntoSampleTags(&map[string]string{"a": "1"})}},
 	)
-	assert.True(t, e.processThresholds())
+	test.engine.Stop()
+	test.wait()
+	assert.True(t, test.engine.thresholdsTainted)
 }
 
 func TestEngineAbortedByThresholds(t *testing.T) {
 	t.Parallel()
-	metric := stats.New("my_metric", stats.Gauge)
+
+	registry := metrics.NewRegistry()
+	metric, err := registry.NewMetric("my_metric", metrics.Gauge)
+	require.NoError(t, err)
 
 	// The MiniRunner sets the value of the metric to 1.25. Considering
 	// the metric is of type Gauge, value > 1.25 should always fail, and
 	// trigger an abort.
 	// **N.B**: a threshold returning an error, won't trigger an abort.
-	ths := stats.NewThresholds([]string{"value>1.25"})
+	ths := metrics.NewThresholds([]string{"value>1.25"})
 	gotParseErr := ths.Parse()
 	require.NoError(t, gotParseErr)
 	ths.Thresholds[0].AbortOnFail = true
 
-	thresholds := map[string]stats.Thresholds{metric.Name: ths}
+	thresholds := map[string]metrics.Thresholds{metric.Name: ths}
 
 	done := make(chan struct{})
 	runner := &minirunner.MiniRunner{
-		Fn: func(ctx context.Context, _ *lib.State, out chan<- stats.SampleContainer) error {
-			out <- stats.Sample{Metric: metric, Value: 1.25, Tags: stats.IntoSampleTags(&map[string]string{"a": "1"})}
+		Fn: func(ctx context.Context, _ *lib.State, out chan<- metrics.SampleContainer) error {
+			out <- metrics.Sample{Metric: metric, Value: 1.25, Tags: metrics.IntoSampleTags(&map[string]string{"a": "1"})}
 			<-ctx.Done()
 			close(done)
 			return nil
 		},
 	}
 
-	_, run, wait := newTestEngine(t, nil, runner, nil, lib.Options{Thresholds: thresholds})
-	defer wait()
+	test := newTestEngineWithRegistry(t, nil, runner, nil, lib.Options{Thresholds: thresholds}, registry)
+	defer test.wait()
 
 	go func() {
-		assert.NoError(t, run())
+		assert.NoError(t, test.run())
 	}()
 
 	select {
@@ -353,45 +389,71 @@ func TestEngineAbortedByThresholds(t *testing.T) {
 
 func TestEngine_processThresholds(t *testing.T) {
 	t.Parallel()
-	metric := stats.New("my_metric", stats.Gauge)
 
 	testdata := map[string]struct {
-		pass  bool
-		ths   map[string][]string
-		abort bool
+		pass bool
+		ths  map[string][]string
 	}{
-		"passing":  {true, map[string][]string{"my_metric": {"value<2"}}, false},
-		"failing":  {false, map[string][]string{"my_metric": {"value>1.25"}}, false},
-		"aborting": {false, map[string][]string{"my_metric": {"value>1.25"}}, true},
+		"passing": {true, map[string][]string{"my_metric": {"value<2"}}},
+		"failing": {false, map[string][]string{"my_metric": {"value>1.25"}}},
 
-		"submetric,match,passing":   {true, map[string][]string{"my_metric{a:1}": {"value<2"}}, false},
-		"submetric,match,failing":   {false, map[string][]string{"my_metric{a:1}": {"value>1.25"}}, false},
-		"submetric,nomatch,passing": {true, map[string][]string{"my_metric{a:2}": {"value<2"}}, false},
-		"submetric,nomatch,failing": {true, map[string][]string{"my_metric{a:2}": {"value>1.25"}}, false},
+		"submetric,match,passing":   {true, map[string][]string{"my_metric{a:1}": {"value<2"}}},
+		"submetric,match,failing":   {false, map[string][]string{"my_metric{a:1}": {"value>1.25"}}},
+		"submetric,nomatch,passing": {true, map[string][]string{"my_metric{a:2}": {"value<2"}}},
+		"submetric,nomatch,failing": {false, map[string][]string{"my_metric{a:2}": {"value>1.25"}}},
+
+		"unused,passing":      {true, map[string][]string{"unused_counter": {"count==0"}}},
+		"unused,failing":      {false, map[string][]string{"unused_counter": {"count>1"}}},
+		"unused,subm,passing": {true, map[string][]string{"unused_counter{a:2}": {"count<1"}}},
+		"unused,subm,failing": {false, map[string][]string{"unused_counter{a:2}": {"count>1"}}},
+
+		"used,passing":               {true, map[string][]string{"used_counter": {"count==2"}}},
+		"used,failing":               {false, map[string][]string{"used_counter": {"count<1"}}},
+		"used,subm,passing":          {true, map[string][]string{"used_counter{b:1}": {"count==2"}}},
+		"used,not-subm,passing":      {true, map[string][]string{"used_counter{b:2}": {"count==0"}}},
+		"used,invalid-subm,passing1": {true, map[string][]string{"used_counter{c:''}": {"count==0"}}},
+		"used,invalid-subm,failing1": {false, map[string][]string{"used_counter{c:''}": {"count>0"}}},
+		"used,invalid-subm,passing2": {true, map[string][]string{"used_counter{c:}": {"count==0"}}},
+		"used,invalid-subm,failing2": {false, map[string][]string{"used_counter{c:}": {"count>0"}}},
 	}
 
 	for name, data := range testdata {
 		name, data := name, data
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			thresholds := make(map[string]stats.Thresholds, len(data.ths))
+
+			registry := metrics.NewRegistry()
+			gaugeMetric, err := registry.NewMetric("my_metric", metrics.Gauge)
+			require.NoError(t, err)
+			counterMetric, err := registry.NewMetric("used_counter", metrics.Counter)
+			require.NoError(t, err)
+			_, err = registry.NewMetric("unused_counter", metrics.Counter)
+			require.NoError(t, err)
+
+			thresholds := make(map[string]metrics.Thresholds, len(data.ths))
 			for m, srcs := range data.ths {
-				ths := stats.NewThresholds(srcs)
+				ths := metrics.NewThresholds(srcs)
 				gotParseErr := ths.Parse()
 				require.NoError(t, gotParseErr)
-				ths.Thresholds[0].AbortOnFail = data.abort
 				thresholds[m] = ths
 			}
 
-			e, _, wait := newTestEngine(t, nil, nil, nil, lib.Options{Thresholds: thresholds})
-			defer wait()
-
-			e.processSamples(
-				[]stats.SampleContainer{stats.Sample{Metric: metric, Value: 1.25, Tags: stats.IntoSampleTags(&map[string]string{"a": "1"})}},
+			runner := &minirunner.MiniRunner{}
+			test := newTestEngineWithRegistry(
+				t, nil, runner, nil, lib.Options{Thresholds: thresholds}, registry,
 			)
 
-			assert.Equal(t, data.abort, e.processThresholds())
-			assert.Equal(t, data.pass, !e.IsTainted())
+			test.engine.OutputManager.AddMetricSamples(
+				[]metrics.SampleContainer{
+					metrics.Sample{Metric: gaugeMetric, Value: 1.25, Tags: metrics.IntoSampleTags(&map[string]string{"a": "1"})},
+					metrics.Sample{Metric: counterMetric, Value: 2, Tags: metrics.IntoSampleTags(&map[string]string{"b": "1"})},
+				},
+			)
+
+			require.NoError(t, test.run())
+			test.wait()
+
+			assert.Equal(t, data.pass, !test.engine.IsTainted())
 		})
 	}
 }
@@ -491,17 +553,18 @@ func TestSentReceivedMetrics(t *testing.T) {
 		registry := metrics.NewRegistry()
 		builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 		r, err := js.New(
-			testutils.NewLogger(t),
+			&lib.RuntimeState{
+				Logger:         testutils.NewLogger(t),
+				BuiltinMetrics: builtinMetrics,
+				Registry:       registry,
+			},
 			&loader.SourceData{URL: &url.URL{Path: "/script.js"}, Data: []byte(ts.Code)},
 			nil,
-			lib.RuntimeOptions{},
-			builtinMetrics,
-			registry,
 		)
 		require.NoError(t, err)
 
 		mockOutput := mockoutput.New()
-		_, run, wait := newTestEngine(t, nil, r, []output.Output{mockOutput}, lib.Options{
+		test := newTestEngine(t, nil, r, []output.Output{mockOutput}, lib.Options{
 			Iterations:            null.IntFrom(tc.Iterations),
 			VUs:                   null.IntFrom(tc.VUs),
 			Hosts:                 tb.Dialer.Hosts,
@@ -511,7 +574,7 @@ func TestSentReceivedMetrics(t *testing.T) {
 		})
 
 		errC := make(chan error)
-		go func() { errC <- run() }()
+		go func() { errC <- test.run() }()
 
 		select {
 		case <-time.After(10 * time.Second):
@@ -519,7 +582,7 @@ func TestSentReceivedMetrics(t *testing.T) {
 		case err := <-errC:
 			require.NoError(t, err)
 		}
-		wait()
+		test.wait()
 
 		checkData := func(name string, expected int64) float64 {
 			data := getMetricSum(mockOutput, name)
@@ -573,7 +636,7 @@ func TestRunTags(t *testing.T) {
 	tb := httpmultibin.NewHTTPMultiBin(t)
 
 	runTagsMap := map[string]string{"foo": "bar", "test": "mest", "over": "written"}
-	runTags := stats.NewSampleTags(runTagsMap)
+	runTags := metrics.NewSampleTags(runTagsMap)
 
 	script := []byte(tb.Replacer.Replace(`
 		import http from "k6/http";
@@ -629,27 +692,28 @@ func TestRunTags(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r, err := js.New(
-		testutils.NewLogger(t),
+		&lib.RuntimeState{
+			Logger:         testutils.NewLogger(t),
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+		},
 		&loader.SourceData{URL: &url.URL{Path: "/script.js"}, Data: script},
 		nil,
-		lib.RuntimeOptions{},
-		builtinMetrics,
-		registry,
 	)
 	require.NoError(t, err)
 
 	mockOutput := mockoutput.New()
-	_, run, wait := newTestEngine(t, nil, r, []output.Output{mockOutput}, lib.Options{
+	test := newTestEngine(t, nil, r, []output.Output{mockOutput}, lib.Options{
 		Iterations:            null.IntFrom(3),
 		VUs:                   null.IntFrom(2),
 		Hosts:                 tb.Dialer.Hosts,
 		RunTags:               runTags,
-		SystemTags:            &stats.DefaultSystemTagSet,
+		SystemTags:            &metrics.DefaultSystemTagSet,
 		InsecureSkipTLSVerify: null.BoolFrom(true),
 	})
 
 	errC := make(chan error)
-	go func() { errC <- run() }()
+	go func() { errC <- test.run() }()
 
 	select {
 	case <-time.After(10 * time.Second):
@@ -657,7 +721,7 @@ func TestRunTags(t *testing.T) {
 	case err := <-errC:
 		require.NoError(t, err)
 	}
-	wait()
+	test.wait()
 
 	systemMetrics := []string{
 		metrics.VUsName, metrics.VUsMaxName, metrics.IterationsName, metrics.IterationDurationName,
@@ -724,32 +788,33 @@ func TestSetupTeardownThresholds(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	runner, err := js.New(
-		testutils.NewLogger(t),
+		&lib.RuntimeState{
+			Logger:         testutils.NewLogger(t),
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+		},
 		&loader.SourceData{URL: &url.URL{Path: "/script.js"}, Data: script},
 		nil,
-		lib.RuntimeOptions{},
-		builtinMetrics,
-		registry,
 	)
 	require.NoError(t, err)
 
-	engine, run, wait := newTestEngine(t, nil, runner, nil, lib.Options{
-		SystemTags:      &stats.DefaultSystemTagSet,
+	test := newTestEngine(t, nil, runner, nil, lib.Options{
+		SystemTags:      &metrics.DefaultSystemTagSet,
 		SetupTimeout:    types.NullDurationFrom(3 * time.Second),
 		TeardownTimeout: types.NullDurationFrom(3 * time.Second),
 		VUs:             null.IntFrom(3),
 	})
-	defer wait()
+	defer test.wait()
 
 	errC := make(chan error)
-	go func() { errC <- run() }()
+	go func() { errC <- test.run() }()
 
 	select {
 	case <-time.After(10 * time.Second):
 		t.Fatal("Test timed out")
 	case err := <-errC:
 		require.NoError(t, err)
-		require.False(t, engine.IsTainted())
+		require.False(t, test.engine.IsTainted())
 	}
 }
 
@@ -777,25 +842,26 @@ func TestSetupException(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	runner, err := js.New(
-		testutils.NewLogger(t),
+		&lib.RuntimeState{
+			Logger:         testutils.NewLogger(t),
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+		},
 		&loader.SourceData{URL: &url.URL{Scheme: "file", Path: "/script.js"}, Data: script},
 		map[string]afero.Fs{"file": memfs},
-		lib.RuntimeOptions{},
-		builtinMetrics,
-		registry,
 	)
 	require.NoError(t, err)
 
-	_, run, wait := newTestEngine(t, nil, runner, nil, lib.Options{
-		SystemTags:      &stats.DefaultSystemTagSet,
+	test := newTestEngine(t, nil, runner, nil, lib.Options{
+		SystemTags:      &metrics.DefaultSystemTagSet,
 		SetupTimeout:    types.NullDurationFrom(3 * time.Second),
 		TeardownTimeout: types.NullDurationFrom(3 * time.Second),
 		VUs:             null.IntFrom(3),
 	})
-	defer wait()
+	defer test.wait()
 
 	errC := make(chan error)
-	go func() { errC <- run() }()
+	go func() { errC <- test.run() }()
 
 	select {
 	case <-time.After(10 * time.Second):
@@ -830,11 +896,13 @@ func TestVuInitException(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	runner, err := js.New(
-		logger,
+		&lib.RuntimeState{
+			Logger:         testutils.NewLogger(t),
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+		},
 		&loader.SourceData{URL: &url.URL{Scheme: "file", Path: "/script.js"}, Data: script},
-		nil, lib.RuntimeOptions{},
-		builtinMetrics,
-		registry,
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -843,9 +911,9 @@ func TestVuInitException(t *testing.T) {
 	require.Empty(t, opts.Validate())
 	require.NoError(t, runner.SetOptions(opts))
 
-	execScheduler, err := local.NewExecutionScheduler(runner, logger)
+	execScheduler, err := local.NewExecutionScheduler(runner, builtinMetrics, logger)
 	require.NoError(t, err)
-	engine, err := NewEngine(execScheduler, opts, lib.RuntimeOptions{}, nil, logger, builtinMetrics)
+	engine, err := NewEngine(execScheduler, opts, lib.RuntimeOptions{}, nil, logger, registry)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -901,28 +969,29 @@ func TestEmittedMetricsWhenScalingDown(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	runner, err := js.New(
-		testutils.NewLogger(t),
+		&lib.RuntimeState{
+			Logger:         testutils.NewLogger(t),
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+		},
 		&loader.SourceData{URL: &url.URL{Path: "/script.js"}, Data: script},
 		nil,
-		lib.RuntimeOptions{},
-		builtinMetrics,
-		registry,
 	)
 	require.NoError(t, err)
 
 	mockOutput := mockoutput.New()
-	engine, run, wait := newTestEngine(t, nil, runner, []output.Output{mockOutput}, lib.Options{})
+	test := newTestEngine(t, nil, runner, []output.Output{mockOutput}, lib.Options{})
 
 	errC := make(chan error)
-	go func() { errC <- run() }()
+	go func() { errC <- test.run() }()
 
 	select {
 	case <-time.After(12 * time.Second):
 		t.Fatal("Test timed out")
 	case err := <-errC:
 		require.NoError(t, err)
-		wait()
-		require.False(t, engine.IsTainted())
+		test.wait()
+		require.False(t, test.engine.IsTainted())
 	}
 
 	// The 3.1 sleep in the default function would cause the first VU to complete 2 full iterations
@@ -989,7 +1058,11 @@ func TestMetricsEmission(t *testing.T) {
 			registry := metrics.NewRegistry()
 			builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 			runner, err := js.New(
-				testutils.NewLogger(t),
+				&lib.RuntimeState{
+					Logger:         testutils.NewLogger(t),
+					BuiltinMetrics: builtinMetrics,
+					Registry:       registry,
+				},
 				&loader.SourceData{URL: &url.URL{Path: "/script.js"}, Data: []byte(fmt.Sprintf(`
 				import { sleep } from "k6";
 				import { Counter } from "k6/metrics";
@@ -1013,25 +1086,22 @@ func TestMetricsEmission(t *testing.T) {
 				}
 				`, tc.minIterDuration, tc.defaultBody))},
 				nil,
-				lib.RuntimeOptions{},
-				builtinMetrics,
-				registry,
 			)
 			require.NoError(t, err)
 
 			mockOutput := mockoutput.New()
-			engine, run, wait := newTestEngine(t, nil, runner, []output.Output{mockOutput}, runner.GetOptions())
+			test := newTestEngine(t, nil, runner, []output.Output{mockOutput}, runner.GetOptions())
 
 			errC := make(chan error)
-			go func() { errC <- run() }()
+			go func() { errC <- test.run() }()
 
 			select {
 			case <-time.After(10 * time.Second):
 				t.Fatal("Test timed out")
 			case err := <-errC:
 				require.NoError(t, err)
-				wait()
-				require.False(t, engine.IsTainted())
+				test.wait()
+				require.False(t, test.engine.IsTainted())
 			}
 
 			assert.Equal(t, tc.expIters, getMetricSum(mockOutput, metrics.IterationsName))
@@ -1101,26 +1171,27 @@ func TestMinIterationDurationInSetupTeardownStage(t *testing.T) {
 			registry := metrics.NewRegistry()
 			builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 			runner, err := js.New(
-				testutils.NewLogger(t),
+				&lib.RuntimeState{
+					Logger:         testutils.NewLogger(t),
+					BuiltinMetrics: builtinMetrics,
+					Registry:       registry,
+				},
 				&loader.SourceData{URL: &url.URL{Path: "/script.js"}, Data: []byte(tc.script)},
 				nil,
-				lib.RuntimeOptions{},
-				builtinMetrics,
-				registry,
 			)
 			require.NoError(t, err)
 
-			engine, run, wait := newTestEngine(t, nil, runner, nil, runner.GetOptions())
+			test := newTestEngine(t, nil, runner, nil, runner.GetOptions())
 
 			errC := make(chan error)
-			go func() { errC <- run() }()
+			go func() { errC <- test.run() }()
 			select {
 			case <-time.After(10 * time.Second):
 				t.Fatal("Test timed out")
 			case err := <-errC:
 				require.NoError(t, err)
-				wait()
-				require.False(t, engine.IsTainted())
+				test.wait()
+				require.False(t, test.engine.IsTainted())
 			}
 		})
 	}
@@ -1128,28 +1199,30 @@ func TestMinIterationDurationInSetupTeardownStage(t *testing.T) {
 
 func TestEngineRunsTeardownEvenAfterTestRunIsAborted(t *testing.T) {
 	t.Parallel()
-	testMetric := stats.New("teardown_metric", stats.Counter)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	registry := metrics.NewRegistry()
+	testMetric, err := registry.NewMetric("teardown_metric", metrics.Counter)
+	require.NoError(t, err)
 
+	var test *testStruct
 	runner := &minirunner.MiniRunner{
-		Fn: func(ctx context.Context, _ *lib.State, out chan<- stats.SampleContainer) error {
-			cancel() // we cancel the runCtx immediately after the test starts
+		Fn: func(_ context.Context, _ *lib.State, _ chan<- metrics.SampleContainer) error {
+			test.runCancel() // we cancel the run immediately after the test starts
 			return nil
 		},
-		TeardownFn: func(ctx context.Context, out chan<- stats.SampleContainer) error {
-			out <- stats.Sample{Metric: testMetric, Value: 1}
+		TeardownFn: func(_ context.Context, out chan<- metrics.SampleContainer) error {
+			out <- metrics.Sample{Metric: testMetric, Value: 1}
 			return nil
 		},
 	}
 
 	mockOutput := mockoutput.New()
-	_, run, wait := newTestEngine(t, ctx, runner, []output.Output{mockOutput}, lib.Options{
+	test = newTestEngineWithRegistry(t, nil, runner, []output.Output{mockOutput}, lib.Options{
 		VUs: null.IntFrom(1), Iterations: null.IntFrom(1),
-	})
+	}, registry)
 
-	assert.NoError(t, run())
-	wait()
+	assert.NoError(t, test.run())
+	test.wait()
 
 	var count float64
 	for _, sample := range mockOutput.Samples {
@@ -1214,8 +1287,13 @@ func TestActiveVUsCount(t *testing.T) {
 
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	runner, err := js.New(logger, &loader.SourceData{URL: &url.URL{Path: "/script.js"}, Data: script}, nil, rtOpts,
-		builtinMetrics, registry)
+	runner, err := js.New(
+		&lib.RuntimeState{
+			Logger:         logger,
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+			RuntimeOptions: rtOpts,
+		}, &loader.SourceData{URL: &url.URL{Path: "/script.js"}, Data: script}, nil)
 	require.NoError(t, err)
 
 	mockOutput := mockoutput.New()
@@ -1228,10 +1306,11 @@ func TestActiveVUsCount(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, opts.Validate())
 	require.NoError(t, runner.SetOptions(opts))
-	execScheduler, err := local.NewExecutionScheduler(runner, logger)
+	execScheduler, err := local.NewExecutionScheduler(runner, builtinMetrics, logger)
 	require.NoError(t, err)
-	engine, err := NewEngine(execScheduler, opts, rtOpts, []output.Output{mockOutput}, logger, builtinMetrics)
+	engine, err := NewEngine(execScheduler, opts, rtOpts, []output.Output{mockOutput}, logger, registry)
 	require.NoError(t, err)
+	require.NoError(t, engine.OutputManager.StartOutputs())
 	run, waitFn, err := engine.Init(ctx, ctx) // no need for 2 different contexts
 	require.NoError(t, err)
 
@@ -1245,6 +1324,7 @@ func TestActiveVUsCount(t *testing.T) {
 		require.NoError(t, err)
 		cancel()
 		waitFn()
+		engine.OutputManager.StopOutputs()
 		require.False(t, engine.IsTainted())
 	}
 

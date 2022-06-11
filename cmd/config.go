@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/mstoykov/envconfig"
 	"github.com/sirupsen/logrus"
@@ -39,7 +40,7 @@ import (
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/executor"
 	"go.k6.io/k6/lib/types"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 )
 
 // configFlagSet returns a FlagSet with the default run configuration flags.
@@ -201,7 +202,7 @@ func getConsolidatedConfig(globalState *globalState, cliConf Config, runnerOpts 
 	// for CLI flags in cmd.getOptions, in case other configuration sources
 	// (e.g. env vars) overrode our default value. This is not done in
 	// lib.Options.Validate to avoid circular imports.
-	if _, err = stats.GetResolversForTrendColumns(conf.SummaryTrendStats); err != nil {
+	if _, err = metrics.GetResolversForTrendColumns(conf.SummaryTrendStats); err != nil {
 		return conf, err
 	}
 
@@ -213,11 +214,11 @@ func getConsolidatedConfig(globalState *globalState, cliConf Config, runnerOpts 
 //
 // Note that if you add option default value here, also add it in command line argument help text.
 func applyDefault(conf Config) Config {
-	if conf.Options.SystemTags == nil {
-		conf.Options.SystemTags = &stats.DefaultSystemTagSet
+	if conf.SystemTags == nil {
+		conf.SystemTags = &metrics.DefaultSystemTagSet
 	}
-	if conf.Options.SummaryTrendStats == nil {
-		conf.Options.SummaryTrendStats = lib.DefaultSummaryTrendStats
+	if conf.SummaryTrendStats == nil {
+		conf.SummaryTrendStats = lib.DefaultSummaryTrendStats
 	}
 	defDNS := types.DefaultDNSConfig()
 	if !conf.DNS.TTL.Valid {
@@ -229,7 +230,12 @@ func applyDefault(conf Config) Config {
 	if !conf.DNS.Policy.Valid {
 		conf.DNS.Policy = defDNS.Policy
 	}
-
+	if !conf.SetupTimeout.Valid {
+		conf.SetupTimeout.Duration = types.Duration(60 * time.Second)
+	}
+	if !conf.TeardownTimeout.Valid {
+		conf.TeardownTimeout.Duration = types.Duration(60 * time.Second)
+	}
 	return conf
 }
 

@@ -30,7 +30,6 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"go.k6.io/k6/errext"
-	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/types"
 	"go.k6.io/k6/ui/pb"
@@ -66,12 +65,12 @@ func validateStages(stages []Stage) []error {
 		if !s.Duration.Valid {
 			errors = append(errors, fmt.Errorf("stage %d doesn't have a duration", stageNum))
 		} else if s.Duration.Duration < 0 {
-			errors = append(errors, fmt.Errorf("the duration for stage %d shouldn't be negative", stageNum))
+			errors = append(errors, fmt.Errorf("the duration for stage %d can't be negative", stageNum))
 		}
 		if !s.Target.Valid {
 			errors = append(errors, fmt.Errorf("stage %d doesn't have a target", stageNum))
 		} else if s.Target.Int64 < 0 {
-			errors = append(errors, fmt.Errorf("the target for stage %d shouldn't be negative", stageNum))
+			errors = append(errors, fmt.Errorf("the target for stage %d can't be negative", stageNum))
 		}
 	}
 	return errors
@@ -125,7 +124,7 @@ func CancelReason(ctx context.Context) error {
 // cancels the executor context passed with ctx.
 func handleInterrupt(ctx context.Context, err error) bool {
 	if err != nil {
-		if common.IsInterruptError(err) {
+		if errext.IsInterruptError(err) {
 			cancelExecutorContext(ctx, err)
 			return true
 		}

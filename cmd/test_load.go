@@ -4,6 +4,10 @@ import (
 	"archive/tar"
 	"bytes"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sync"
 
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
@@ -12,8 +16,8 @@ import (
 	"go.k6.io/k6/errext/exitcodes"
 	"go.k6.io/k6/js"
 	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/loader"
+	"go.k6.io/k6/metrics"
 )
 
 const (
@@ -25,12 +29,15 @@ const (
 // and configured k6 test.
 type loadedTest struct {
 	sourceRootPath  string // contains the raw string the user supplied
+	pwd             string
 	source          *loader.SourceData
+	fs              afero.Fs
 	fileSystems     map[string]afero.Fs
 	runtimeOptions  lib.RuntimeOptions
 	metricsRegistry *metrics.Registry
 	builtInMetrics  *metrics.BuiltinMetrics
 	initRunner      lib.Runner // TODO: rename to something more appropriate
+	keywriter       io.Closer
 
 	// Only set if cliConfigGetter is supplied to loadAndConfigureTest() or if
 	// consolidateDeriveAndValidateConfig() is manually called.
@@ -49,7 +56,7 @@ func loadAndConfigureTest(
 
 	sourceRootPath := args[0]
 	gs.logger.Debugf("Resolving and reading test '%s'...", sourceRootPath)
-	src, fileSystems, err := readSource(gs, sourceRootPath)
+	src, fileSystems, pwd, err := readSource(gs, sourceRootPath)
 	if err != nil {
 		return nil, err
 	}
@@ -67,8 +74,10 @@ func loadAndConfigureTest(
 
 	registry := metrics.NewRegistry()
 	test := &loadedTest{
+		pwd:             pwd,
 		sourceRootPath:  sourceRootPath,
 		source:          src,
+		fs:              gs.fs,
 		fileSystems:     fileSystems,
 		runtimeOptions:  runtimeOptions,
 		metricsRegistry: registry,
@@ -100,12 +109,27 @@ func (lt *loadedTest) initializeFirstRunner(gs *globalState) error {
 		testType = detectTestType(lt.source.Data)
 	}
 
+	state := &lib.RuntimeState{
+		Logger:         gs.logger,
+		RuntimeOptions: lt.runtimeOptions,
+		BuiltinMetrics: lt.builtInMetrics,
+		Registry:       lt.metricsRegistry,
+	}
+	if lt.runtimeOptions.KeyWriter.Valid {
+		logger.Warnf("SSLKEYLOGFILE was specified, logging TLS connection keys to '%s'...",
+			lt.runtimeOptions.KeyWriter.String)
+		keyfileName := filepath.Join(lt.pwd, lt.runtimeOptions.KeyWriter.String)
+		f, err := lt.fs.OpenFile(keyfileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+		if err != nil {
+			return err
+		}
+		lt.keywriter = f
+		state.KeyLogger = &syncWriter{w: f}
+	}
 	switch testType {
 	case testTypeJS:
 		logger.Debug("Trying to load as a JS test...")
-		runner, err := js.New(
-			gs.logger, lt.source, lt.fileSystems, lt.runtimeOptions, lt.builtInMetrics, lt.metricsRegistry,
-		)
+		runner, err := js.New(state, lt.source, lt.fileSystems)
 		// TODO: should we use common.UnwrapGojaInterruptedError() here?
 		if err != nil {
 			return fmt.Errorf("could not load JS test '%s': %w", testPath, err)
@@ -126,7 +150,7 @@ func (lt *loadedTest) initializeFirstRunner(gs *globalState) error {
 		switch arc.Type {
 		case testTypeJS:
 			logger.Debug("Evaluating JS from archive bundle...")
-			lt.initRunner, err = js.NewFromArchive(gs.logger, arc, lt.runtimeOptions, lt.builtInMetrics, lt.metricsRegistry)
+			lt.initRunner, err = js.NewFromArchive(state, arc)
 			if err != nil {
 				return fmt.Errorf("could not load JS from test archive bundle '%s': %w", testPath, err)
 			}
@@ -141,15 +165,15 @@ func (lt *loadedTest) initializeFirstRunner(gs *globalState) error {
 
 // readSource is a small wrapper around loader.ReadSource returning
 // result of the load and filesystems map
-func readSource(globalState *globalState, filename string) (*loader.SourceData, map[string]afero.Fs, error) {
+func readSource(globalState *globalState, filename string) (*loader.SourceData, map[string]afero.Fs, string, error) {
 	pwd, err := globalState.getwd()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
 	filesystems := loader.CreateFilesystems(globalState.fs)
 	src, err := loader.ReadSource(globalState.logger, filename, pwd, filesystems, globalState.stdIn)
-	return src, filesystems, err
+	return src, filesystems, pwd, err
 }
 
 func detectTestType(data []byte) string {
@@ -184,8 +208,13 @@ func (lt *loadedTest) consolidateDeriveAndValidateConfig(
 	// If parsing the threshold expressions failed, consider it as an
 	// invalid configuration error.
 	if !lt.runtimeOptions.NoThresholds.Bool {
-		for _, thresholds := range consolidatedConfig.Options.Thresholds {
-			err = thresholds.Parse()
+		for metricName, thresholdsDefinition := range consolidatedConfig.Options.Thresholds {
+			err = thresholdsDefinition.Parse()
+			if err != nil {
+				return errext.WithExitCodeIfNone(err, exitcodes.InvalidConfig)
+			}
+
+			err = thresholdsDefinition.Validate(metricName, lt.metricsRegistry)
 			if err != nil {
 				return errext.WithExitCodeIfNone(err, exitcodes.InvalidConfig)
 			}
@@ -201,4 +230,15 @@ func (lt *loadedTest) consolidateDeriveAndValidateConfig(
 	lt.derivedConfig = derivedConfig
 
 	return nil
+}
+
+type syncWriter struct {
+	w io.Writer
+	m sync.Mutex
+}
+
+func (cw *syncWriter) Write(b []byte) (int, error) {
+	cw.m.Lock()
+	defer cw.m.Unlock()
+	return cw.w.Write(b)
 }
