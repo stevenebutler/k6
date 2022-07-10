@@ -152,8 +152,7 @@ func (r *Runner) NewVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.Sampl
 // nolint:funlen
 func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.SampleContainer) (*VU, error) {
 	// Instantiate a new bundle, make a VU out of it.
-	moduleVUImpl := newModuleVUImpl()
-	bi, err := r.Bundle.Instantiate(r.Logger, idLocal, moduleVUImpl)
+	bi, err := r.Bundle.Instantiate(r.Logger, idLocal)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +251,6 @@ func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.Sampl
 		BPool:          bpool.NewBufferPool(100),
 		Samples:        samplesOut,
 		scenarioIter:   make(map[string]uint64),
-		moduleVUImpl:   moduleVUImpl,
 	}
 
 	vu.state = &lib.State{
@@ -399,7 +397,7 @@ func (r *Runner) HandleSummary(ctx context.Context, summary *lib.Summary) (map[s
 		<-ctx.Done()
 		vu.Runtime.Interrupt(context.Canceled)
 	}()
-	*vu.Context = ctx
+	vu.moduleVUImpl.ctx = ctx
 
 	wrapper := strings.Replace(summaryWrapperLambdaCode, "/*JSLIB_SUMMARY_CODE*/", jslibSummaryCode, 1)
 	handleSummaryWrapperRaw, err := vu.Runtime.RunString(wrapper)
@@ -539,7 +537,7 @@ func (r *Runner) runPart(
 		<-ctx.Done()
 		vu.Runtime.Interrupt(context.Canceled)
 	}()
-	*vu.Context = ctx
+	vu.moduleVUImpl.ctx = ctx
 
 	group, err := r.GetDefaultGroup().Group(name)
 	if err != nil {
@@ -602,8 +600,6 @@ type VU struct {
 	state *lib.State
 	// count of iterations executed by this VU in each scenario
 	scenarioIter map[string]uint64
-
-	moduleVUImpl *moduleVUImpl
 }
 
 // Verify that interfaces are implemented
@@ -666,7 +662,7 @@ func (u *VU) Activate(params *lib.VUActivationParams) lib.ActiveVU {
 	}
 
 	ctx := params.RunContext
-	*u.Context = ctx
+	u.moduleVUImpl.ctx = ctx
 
 	u.state.GetScenarioVUIter = func() uint64 {
 		return u.scenarioIter[params.Scenario]
