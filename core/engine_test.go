@@ -254,7 +254,7 @@ func TestEngineOutput(t *testing.T) {
 	}
 	metric := test.engine.MetricsEngine.ObservedMetrics["test_metric"]
 	if assert.NotNil(t, metric) {
-		sink := metric.Sink.(*metrics.TrendSink) // nolint: forcetypeassert
+		sink := metric.Sink.(*metrics.TrendSink) //nolint:forcetypeassert
 		if assert.NotNil(t, sink) {
 			numOutputSamples := len(cSamples)
 			numEngineSamples := len(sink.Values)
@@ -967,7 +967,7 @@ func TestVuInitException(t *testing.T) {
 
 	var exception errext.Exception
 	require.ErrorAs(t, err, &exception)
-	assert.Equal(t, "Error: oops in 2\n\tat file:///script.js:10:9(31)\n", err.Error())
+	assert.Equal(t, "Error: oops in 2\n\tat file:///script.js:10:9(30)\n\tat native\n", err.Error())
 
 	var errWithHint errext.HasHint
 	require.ErrorAs(t, err, &errWithHint)
@@ -1153,7 +1153,6 @@ func TestMetricsEmission(t *testing.T) {
 	}
 }
 
-//nolint: funlen
 func TestMinIterationDurationInSetupTeardownStage(t *testing.T) {
 	t.Parallel()
 	setupScript := `

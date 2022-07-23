@@ -61,7 +61,7 @@ var _ lib.Runner = &Runner{}
 // TODO: https://github.com/grafana/k6/issues/2186
 // An advanced TLS support should cover the rid of the warning
 //
-// nolint:gochecknoglobals
+//nolint:gochecknoglobals
 var nameToCertWarning sync.Once
 
 type Runner struct {
@@ -149,7 +149,7 @@ func (r *Runner) NewVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.Sampl
 	return lib.InitializedVU(vu), nil
 }
 
-// nolint:funlen
+//nolint:funlen
 func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.SampleContainer) (*VU, error) {
 	// Instantiate a new bundle, make a VU out of it.
 	bi, err := r.Bundle.Instantiate(r.Logger, idLocal)
@@ -213,7 +213,7 @@ func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.Sampl
 				"and let k6 automatically detect from the provided certificate. It follows the Go's NameToCertificate " +
 				"deprecation - https://pkg.go.dev/crypto/tls@go1.17#Config.")
 		})
-		// nolint:staticcheck // ignore SA1019 we can deprecate it but we have to continue to support the previous code.
+		//nolint:staticcheck // ignore SA1019 we can deprecate it but we have to continue to support the previous code.
 		tlsConfig.NameToCertificate = nameToCert
 	}
 	transport := &http.Transport{
@@ -382,13 +382,11 @@ func (r *Runner) HandleSummary(ctx context.Context, summary *lib.Summary) (map[s
 	}
 
 	handleSummaryFn := goja.Undefined()
-	if exported := vu.Runtime.Get("exports").ToObject(vu.Runtime); exported != nil {
-		fn := exported.Get(consts.HandleSummaryFn)
-		if _, ok := goja.AssertFunction(fn); ok {
-			handleSummaryFn = fn
-		} else if fn != nil {
-			return nil, fmt.Errorf("exported identifier %s must be a function", consts.HandleSummaryFn)
-		}
+	fn := vu.getExported(consts.HandleSummaryFn)
+	if _, ok := goja.AssertFunction(fn); ok {
+		handleSummaryFn = fn
+	} else if fn != nil {
+		return nil, fmt.Errorf("exported identifier %s must be a function", consts.HandleSummaryFn)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, r.getTimeoutFor(consts.HandleSummaryFn))
@@ -522,11 +520,7 @@ func (r *Runner) runPart(
 	if err != nil {
 		return goja.Undefined(), err
 	}
-	exp := vu.Runtime.Get("exports").ToObject(vu.Runtime)
-	if exp == nil {
-		return goja.Undefined(), nil
-	}
-	fn, ok := goja.AssertFunction(exp.Get(name))
+	fn, ok := goja.AssertFunction(vu.getExported(name))
 	if !ok {
 		return goja.Undefined(), nil
 	}
@@ -767,6 +761,10 @@ func (u *ActiveVU) RunOnce() error {
 	}
 
 	return err
+}
+
+func (u *VU) getExported(name string) goja.Value {
+	return u.BundleInstance.pgm.module.Get("exports").ToObject(u.Runtime).Get(name)
 }
 
 // if isDefault is true, cancel also needs to be provided and it should cancel the provided context

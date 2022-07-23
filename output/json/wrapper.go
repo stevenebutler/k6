@@ -32,8 +32,8 @@ import (
 type sampleEnvelope struct {
 	Type string `json:"type"`
 	Data struct {
-		Time  time.Time         `json:"time"`
-		Value float64           `json:"value"`
+		Time  time.Time           `json:"time"`
+		Value float64             `json:"value"`
 		Tags  *metrics.SampleTags `json:"tags"`
 	} `json:"data"`
 	Metric string `json:"metric"`
@@ -54,15 +54,13 @@ func wrapSample(sample metrics.Sample) sampleEnvelope {
 
 //easyjson:json
 type metricEnvelope struct {
-	Type   string        `json:"type"`
-	Data   *metrics.Metric `json:"data"`
-	Metric string        `json:"metric"`
-}
-
-func wrapMetric(metric *metrics.Metric) metricEnvelope {
-	return metricEnvelope{
-		Type:   "Metric",
-		Metric: metric.Name,
-		Data:   metric,
-	}
+	Type string `json:"type"`
+	Data struct {
+		Name       string               `json:"name"`
+		Type       metrics.MetricType   `json:"type"`
+		Contains   metrics.ValueType    `json:"contains"`
+		Thresholds metrics.Thresholds   `json:"thresholds"`
+		Submetrics []*metrics.Submetric `json:"submetrics"`
+	} `json:"data"`
+	Metric string `json:"metric"`
 }

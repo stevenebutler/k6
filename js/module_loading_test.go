@@ -25,6 +25,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/require"
@@ -313,10 +314,10 @@ func TestLoadCycle(t *testing.T) {
 	// This is mostly the example from https://hacks.mozilla.org/2018/03/es-modules-a-cartoon-deep-dive/
 	fs := afero.NewMemMapFs()
 	require.NoError(t, afero.WriteFile(fs, "/counter.js", []byte(`
-			let message = require("./main.js").message;
+			let main = require("./main.js");
 			exports.count = 5;
 			export function a() {
-				return message;
+				return main.message;
 			}
 	`), os.ModePerm))
 
@@ -444,7 +445,6 @@ func TestLoadCycleBinding(t *testing.T) {
 func TestBrowserified(t *testing.T) {
 	t.Parallel()
 	fs := afero.NewMemMapFs()
-	//nolint: lll
 	require.NoError(t, afero.WriteFile(fs, "/browserified.js", []byte(`
 		(function(f){if(typeof exports==="object"&&typeof module!=="undefined"){module.exports=f()}else if(typeof define==="function"&&define.amd){define([],f)}else{var g;if(typeof window!=="undefined"){g=window}else if(typeof global!=="undefined"){g=global}else if(typeof self!=="undefined"){g=self}else{g=this}g.npmlibs = f()}})(function(){var define,module,exports;return (function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){var c="function"==typeof require&&require;if(!f&&c)return c(i,!0);if(u)return u(i,!0);var a=new Error("Cannot find module '"+i+"'");throw a.code="MODULE_NOT_FOUND",a}var p=n[i]={exports:{}};e[i][0].call(p.exports,function(r){var n=e[i][1][r];return o(n||r)},p,p.exports,r,e,n,t)}return n[i].exports}for(var u="function"==typeof require&&require,i=0;i<t.length;i++)o(t[i]);return o}return r})()({1:[function(require,module,exports){
 		module.exports.A = function () {
@@ -605,4 +605,108 @@ func TestLoadingSourceMapsDoesntErrorOut(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestOptionsAreGloballyReadable(t *testing.T) {
+	t.Parallel()
+	fs := afero.NewMemMapFs()
+	require.NoError(t, afero.WriteFile(fs, "/A.js", []byte(`
+        export function A() {
+        // we can technically get a field set from outside of js this way
+            return options.someField;
+        }`), os.ModePerm))
+	r1, err := getSimpleRunner(t, "/script.js", `
+     import { A } from "./A.js";
+     export let options = {
+       someField: "here is an option",
+     }
+
+        export default function(data) {
+            var caught = false;
+            try{
+                if (A() == "here is an option") {
+                  throw "oops"
+                }
+            } catch(e) {
+                if (e.message != "options is not defined") {
+                    throw e;
+                }
+                caught = true;
+            }
+            if (!caught) {
+                throw "expected exception"
+            }
+        } `, fs, lib.RuntimeOptions{CompatibilityMode: null.StringFrom("extended")})
+	require.NoError(t, err)
+
+	arc := r1.MakeArchive()
+	registry := metrics.NewRegistry()
+	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
+	r2, err := NewFromArchive(&lib.RuntimeState{
+		Logger:         testutils.NewLogger(t),
+		BuiltinMetrics: builtinMetrics,
+		Registry:       registry,
+	}, arc)
+	require.NoError(t, err)
+
+	runners := map[string]*Runner{"Source": r1, "Archive": r2}
+	for name, r := range runners {
+		r := r
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ch := newDevNullSampleChannel()
+			defer close(ch)
+			initVU, err := r.NewVU(1, 1, ch)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
+			require.NoError(t, err)
+			err = vu.RunOnce()
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestOptionsAreNotGloballyWritable(t *testing.T) {
+	t.Parallel()
+	fs := afero.NewMemMapFs()
+	require.NoError(t, afero.WriteFile(fs, "/A.js", []byte(`
+    export function A() {
+        // this requires that this is defined
+        options.minIterationDuration = "1h"
+    }`), os.ModePerm))
+	r1, err := getSimpleRunner(t, "/script.js", `
+    import {A} from "/A.js"
+    export let options = {minIterationDuration: "5m"}
+
+    export default () =>{}
+    var caught = false;
+    try{
+        A()
+    } catch(e) {
+        if (e.message != "options is not defined") {
+            throw e;
+        }
+        caught = true;
+    }
+
+    if (!caught) {
+        throw "expected exception"
+    }`, fs, lib.RuntimeOptions{CompatibilityMode: null.StringFrom("extended")})
+	require.NoError(t, err)
+
+	// here it exists
+	require.EqualValues(t, time.Minute*5, r1.GetOptions().MinIterationDuration.Duration)
+	arc := r1.MakeArchive()
+	registry := metrics.NewRegistry()
+	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
+	r2, err := NewFromArchive(&lib.RuntimeState{
+		Logger:         testutils.NewLogger(t),
+		BuiltinMetrics: builtinMetrics,
+		Registry:       registry,
+	}, arc)
+	require.NoError(t, err)
+
+	require.EqualValues(t, time.Minute*5, r2.GetOptions().MinIterationDuration.Duration)
 }
