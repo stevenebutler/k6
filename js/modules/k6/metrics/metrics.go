@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package metrics
 
 import (
@@ -92,7 +72,7 @@ func limitValue(v string) string {
 	}, string(omitMsg))
 }
 
-func (m Metric) add(v goja.Value, addTags ...map[string]string) (bool, error) {
+func (m Metric) add(v goja.Value, addTags goja.Value) (bool, error) {
 	state := m.vu.State()
 	if state == nil {
 		return false, ErrMetricsAddInInitContext
@@ -128,14 +108,21 @@ func (m Metric) add(v goja.Value, addTags ...map[string]string) (bool, error) {
 		return raiseNan()
 	}
 
-	tags := state.CloneTags()
-	for _, ts := range addTags {
-		for k, v := range ts {
-			tags[k] = v
-		}
+	tags := state.Tags.GetCurrentValues()
+	newTags, err := common.ApplyCustomUserTags(m.vu.Runtime(), tags, addTags)
+	if err != nil {
+		return false, fmt.Errorf("cannot add tags for the '%s' custom metric: %w", m.metric.Name, err)
 	}
+	tags = newTags
 
-	sample := metrics.Sample{Time: time.Now(), Metric: m.metric, Value: vfloat, Tags: metrics.IntoSampleTags(&tags)}
+	sample := metrics.Sample{
+		TimeSeries: metrics.TimeSeries{
+			Metric: m.metric,
+			Tags:   tags,
+		},
+		Time:  time.Now(),
+		Value: vfloat,
+	}
 	metrics.PushIfNotDone(m.vu.Context(), state.Samples, sample)
 	return true, nil
 }

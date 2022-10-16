@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 // Package k6 implements the module imported as 'k6' from inside k6.
 package k6
 
@@ -125,12 +105,16 @@ func (mi *K6) Group(name string, fn goja.Callable) (goja.Value, error) {
 
 	shouldUpdateTag := state.Options.SystemTags.Has(metrics.TagGroup)
 	if shouldUpdateTag {
-		state.Tags.Set("group", g.Path)
+		state.Tags.Modify(func(currentTags *metrics.TagSet) *metrics.TagSet {
+			return currentTags.With("group", g.Path)
+		})
 	}
 	defer func() {
 		state.Group = old
 		if shouldUpdateTag {
-			state.Tags.Set("group", old.Path)
+			state.Tags.Modify(func(currentTags *metrics.TagSet) *metrics.TagSet {
+				return currentTags.With("group", old.Path)
+			})
 		}
 	}()
 
@@ -138,14 +122,15 @@ func (mi *K6) Group(name string, fn goja.Callable) (goja.Value, error) {
 	ret, err := fn(goja.Undefined())
 	t := time.Now()
 
-	tags := state.CloneTags()
-
 	ctx := mi.vu.Context()
+	ctm := state.Tags.GetCurrentValues()
 	metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
-		Time:   t,
-		Metric: state.BuiltinMetrics.GroupDuration,
-		Tags:   metrics.IntoSampleTags(&tags),
-		Value:  metrics.D(t.Sub(startTime)),
+		TimeSeries: metrics.TimeSeries{
+			Metric: state.BuiltinMetrics.GroupDuration,
+			Tags:   ctm,
+		},
+		Time:  t,
+		Value: metrics.D(t.Sub(startTime)),
 	})
 
 	return ret, err
@@ -166,12 +151,13 @@ func (mi *K6) Check(arg0, checks goja.Value, extras ...goja.Value) (bool, error)
 	t := time.Now()
 
 	// Prepare the metric tags
-	commonTags := state.CloneTags()
+	commonTags := state.Tags.GetCurrentValues()
 	if len(extras) > 0 {
-		obj := extras[0].ToObject(rt)
-		for _, k := range obj.Keys() {
-			commonTags[k] = obj.Get(k).String()
+		newTags, err := common.ApplyCustomUserTags(rt, commonTags, extras[0])
+		if err != nil {
+			return false, err
 		}
+		commonTags = newTags
 	}
 
 	succ := true
@@ -180,18 +166,15 @@ func (mi *K6) Check(arg0, checks goja.Value, extras ...goja.Value) (bool, error)
 	for _, name := range obj.Keys() {
 		val := obj.Get(name)
 
-		tags := make(map[string]string, len(commonTags))
-		for k, v := range commonTags {
-			tags[k] = v
-		}
-
 		// Resolve the check record.
 		check, err := state.Group.Check(name)
 		if err != nil {
 			return false, err
 		}
+
+		tags := commonTags
 		if state.Options.SystemTags.Has(metrics.TagCheck) {
-			tags["check"] = check.Name
+			tags = tags.With("check", check.Name)
 		}
 
 		// Resolve callables into values.
@@ -205,23 +188,28 @@ func (mi *K6) Check(arg0, checks goja.Value, extras ...goja.Value) (bool, error)
 			}
 		}
 
-		sampleTags := metrics.IntoSampleTags(&tags)
-
 		// Emit! (But only if we have a valid context.)
 		select {
 		case <-ctx.Done():
 		default:
+			sample := metrics.Sample{
+				TimeSeries: metrics.TimeSeries{
+					Metric: state.BuiltinMetrics.Checks,
+					Tags:   tags,
+				},
+				Time:  t,
+				Value: 0,
+			}
 			if val.ToBoolean() {
 				atomic.AddInt64(&check.Passes, 1)
-				metrics.PushIfNotDone(ctx, state.Samples,
-					metrics.Sample{Time: t, Metric: state.BuiltinMetrics.Checks, Tags: sampleTags, Value: 1})
+				sample.Value = 1
 			} else {
 				atomic.AddInt64(&check.Fails, 1)
-				metrics.PushIfNotDone(ctx, state.Samples,
-					metrics.Sample{Time: t, Metric: state.BuiltinMetrics.Checks, Tags: sampleTags, Value: 0})
+
 				// A single failure makes the return value false.
 				succ = false
 			}
+			metrics.PushIfNotDone(ctx, state.Samples, sample)
 		}
 
 		if exc != nil {

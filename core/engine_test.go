@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package core
 
 import (
@@ -58,32 +38,54 @@ type testStruct struct {
 	run       func() error
 	runCancel func()
 	wait      func()
+	piState   *lib.TestPreInitState
+}
+
+func getTestPreInitState(tb testing.TB) *lib.TestPreInitState {
+	reg := metrics.NewRegistry()
+	return &lib.TestPreInitState{
+		Logger:         testutils.NewLogger(tb),
+		RuntimeOptions: lib.RuntimeOptions{},
+		Registry:       reg,
+		BuiltinMetrics: metrics.RegisterBuiltinMetrics(reg),
+	}
+}
+
+func getTestRunState(
+	tb testing.TB, piState *lib.TestPreInitState, options lib.Options, runner lib.Runner,
+) *lib.TestRunState {
+	require.Empty(tb, options.Validate())
+	require.NoError(tb, runner.SetOptions(options))
+	return &lib.TestRunState{
+		TestPreInitState: piState,
+		Options:          options,
+		Runner:           runner,
+		RunTags:          piState.Registry.RootTagSet().WithTagsFromMap(options.RunTags),
+	}
 }
 
 // Wrapper around NewEngine that applies a logger and manages the options.
-func newTestEngineWithRegistry( //nolint:golint
-	t *testing.T, runTimeout *time.Duration, runner lib.Runner, outputs []output.Output, opts lib.Options,
-	registry *metrics.Registry,
+func newTestEngineWithTestPreInitState( //nolint:golint
+	t *testing.T, runTimeout *time.Duration, runner lib.Runner, outputs []output.Output,
+	opts lib.Options, piState *lib.TestPreInitState,
 ) *testStruct {
 	if runner == nil {
-		runner = &minirunner.MiniRunner{}
+		runner = &minirunner.MiniRunner{
+			PreInitState: piState,
+		}
 	}
 
-	logger := logrus.New()
-	logger.SetOutput(testutils.NewTestOutput(t))
 	newOpts, err := executor.DeriveScenariosFromShortcuts(lib.Options{
 		MetricSamplesBufferSize: null.NewInt(200, false),
-	}.Apply(runner.GetOptions()).Apply(opts), logger)
-	require.NoError(t, err)
-	require.Empty(t, newOpts.Validate())
-
-	require.NoError(t, runner.SetOptions(newOpts))
-
-	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	execScheduler, err := local.NewExecutionScheduler(runner, builtinMetrics, logger)
+	}.Apply(runner.GetOptions()).Apply(opts), piState.Logger)
 	require.NoError(t, err)
 
-	engine, err := NewEngine(execScheduler, opts, lib.RuntimeOptions{}, outputs, logger, registry)
+	testRunState := getTestRunState(t, piState, newOpts, runner)
+
+	execScheduler, err := local.NewExecutionScheduler(testRunState)
+	require.NoError(t, err)
+
+	engine, err := NewEngine(testRunState, execScheduler, outputs)
 	require.NoError(t, err)
 	require.NoError(t, engine.OutputManager.StartOutputs())
 
@@ -109,6 +111,7 @@ func newTestEngineWithRegistry( //nolint:golint
 			waitFn()
 			engine.OutputManager.StopOutputs()
 		},
+		piState: piState,
 	}
 	return test
 }
@@ -116,7 +119,7 @@ func newTestEngineWithRegistry( //nolint:golint
 func newTestEngine(
 	t *testing.T, runTimeout *time.Duration, runner lib.Runner, outputs []output.Output, opts lib.Options,
 ) *testStruct {
-	return newTestEngineWithRegistry(t, runTimeout, runner, outputs, opts, metrics.NewRegistry())
+	return newTestEngineWithTestPreInitState(t, runTimeout, runner, outputs, opts, getTestPreInitState(t))
 }
 
 func TestEngineRun(t *testing.T) {
@@ -156,27 +159,34 @@ func TestEngineRun(t *testing.T) {
 	t.Run("collects samples", func(t *testing.T) {
 		t.Parallel()
 
-		registry := metrics.NewRegistry()
-		testMetric, err := registry.NewMetric("test_metric", metrics.Trend)
+		piState := getTestPreInitState(t)
+		testMetric, err := piState.Registry.NewMetric("test_metric", metrics.Trend)
 		require.NoError(t, err)
 
 		signalChan := make(chan interface{})
 
 		runner := &minirunner.MiniRunner{
 			Fn: func(ctx context.Context, _ *lib.State, out chan<- metrics.SampleContainer) error {
-				metrics.PushIfNotDone(ctx, out, metrics.Sample{Metric: testMetric, Time: time.Now(), Value: 1})
+				metrics.PushIfNotDone(ctx, out, metrics.Sample{
+					TimeSeries: metrics.TimeSeries{Metric: testMetric, Tags: piState.Registry.RootTagSet()},
+					Time:       time.Now(),
+					Value:      1,
+				})
 				close(signalChan)
 				<-ctx.Done()
-				metrics.PushIfNotDone(ctx, out, metrics.Sample{Metric: testMetric, Time: time.Now(), Value: 1})
+				metrics.PushIfNotDone(ctx, out, metrics.Sample{
+					TimeSeries: metrics.TimeSeries{Metric: testMetric, Tags: piState.Registry.RootTagSet()},
+					Time:       time.Now(), Value: 1,
+				})
 				return nil
 			},
 		}
 
 		mockOutput := mockoutput.New()
-		test := newTestEngineWithRegistry(t, nil, runner, []output.Output{mockOutput}, lib.Options{
+		test := newTestEngineWithTestPreInitState(t, nil, runner, []output.Output{mockOutput}, lib.Options{
 			VUs:        null.IntFrom(1),
 			Iterations: null.IntFrom(1),
-		}, registry)
+		}, piState)
 
 		errC := make(chan error)
 		go func() { errC <- test.run() }()
@@ -226,22 +236,22 @@ func TestEngineStopped(t *testing.T) {
 func TestEngineOutput(t *testing.T) {
 	t.Parallel()
 
-	registry := metrics.NewRegistry()
-	testMetric, err := registry.NewMetric("test_metric", metrics.Trend)
+	piState := getTestPreInitState(t)
+	testMetric, err := piState.Registry.NewMetric("test_metric", metrics.Trend)
 	require.NoError(t, err)
 
 	runner := &minirunner.MiniRunner{
 		Fn: func(_ context.Context, _ *lib.State, out chan<- metrics.SampleContainer) error {
-			out <- metrics.Sample{Metric: testMetric}
+			out <- metrics.Sample{TimeSeries: metrics.TimeSeries{Metric: testMetric}}
 			return nil
 		},
 	}
 
 	mockOutput := mockoutput.New()
-	test := newTestEngineWithRegistry(t, nil, runner, []output.Output{mockOutput}, lib.Options{
+	test := newTestEngineWithTestPreInitState(t, nil, runner, []output.Output{mockOutput}, lib.Options{
 		VUs:        null.IntFrom(1),
 		Iterations: null.IntFrom(1),
-	}, registry)
+	}, piState)
 
 	assert.NoError(t, test.run())
 	test.wait()
@@ -269,19 +279,26 @@ func TestEngine_processSamples(t *testing.T) {
 	t.Run("metric", func(t *testing.T) {
 		t.Parallel()
 
-		registry := metrics.NewRegistry()
-		metric, err := registry.NewMetric("my_metric", metrics.Gauge)
+		piState := getTestPreInitState(t)
+		metric, err := piState.Registry.NewMetric("my_metric", metrics.Gauge)
 		require.NoError(t, err)
 
 		done := make(chan struct{})
 		runner := &minirunner.MiniRunner{
 			Fn: func(ctx context.Context, _ *lib.State, out chan<- metrics.SampleContainer) error {
-				out <- metrics.Sample{Metric: metric, Value: 1.25, Tags: metrics.IntoSampleTags(&map[string]string{"a": "1"})}
+				out <- metrics.Sample{
+					TimeSeries: metrics.TimeSeries{
+						Metric: metric,
+						Tags:   piState.Registry.RootTagSet().WithTagsFromMap(map[string]string{"a": "1"}),
+					},
+					Value: 1.25,
+					Time:  time.Now(),
+				}
 				close(done)
 				return nil
 			},
 		}
-		test := newTestEngineWithRegistry(t, nil, runner, nil, lib.Options{}, registry)
+		test := newTestEngineWithTestPreInitState(t, nil, runner, nil, lib.Options{}, piState)
 
 		go func() {
 			assert.NoError(t, test.run())
@@ -301,8 +318,8 @@ func TestEngine_processSamples(t *testing.T) {
 	t.Run("submetric", func(t *testing.T) {
 		t.Parallel()
 
-		registry := metrics.NewRegistry()
-		metric, err := registry.NewMetric("my_metric", metrics.Gauge)
+		piState := getTestPreInitState(t)
+		metric, err := piState.Registry.NewMetric("my_metric", metrics.Gauge)
 		require.NoError(t, err)
 
 		ths := metrics.NewThresholds([]string{`value<2`})
@@ -312,16 +329,23 @@ func TestEngine_processSamples(t *testing.T) {
 		done := make(chan struct{})
 		runner := &minirunner.MiniRunner{
 			Fn: func(ctx context.Context, _ *lib.State, out chan<- metrics.SampleContainer) error {
-				out <- metrics.Sample{Metric: metric, Value: 1.25, Tags: metrics.IntoSampleTags(&map[string]string{"a": "1", "b": "2"})}
+				out <- metrics.Sample{
+					TimeSeries: metrics.TimeSeries{
+						Metric: metric,
+						Tags:   piState.Registry.RootTagSet().WithTagsFromMap(map[string]string{"a": "1", "b": "2"}),
+					},
+					Value: 1.25,
+					Time:  time.Now(),
+				}
 				close(done)
 				return nil
 			},
 		}
-		test := newTestEngineWithRegistry(t, nil, runner, nil, lib.Options{
+		test := newTestEngineWithTestPreInitState(t, nil, runner, nil, lib.Options{
 			Thresholds: map[string]metrics.Thresholds{
 				"my_metric{a:1}": ths,
 			},
-		}, registry)
+		}, piState)
 
 		go func() {
 			assert.NoError(t, test.run())
@@ -337,7 +361,7 @@ func TestEngine_processSamples(t *testing.T) {
 
 		assert.Len(t, test.engine.MetricsEngine.ObservedMetrics, 2)
 		sms := test.engine.MetricsEngine.ObservedMetrics["my_metric{a:1}"]
-		assert.EqualValues(t, map[string]string{"a": "1"}, sms.Sub.Tags.CloneTags())
+		assert.EqualValues(t, map[string]string{"a": "1"}, sms.Sub.Tags.Map())
 
 		assert.IsType(t, &metrics.GaugeSink{}, test.engine.MetricsEngine.ObservedMetrics["my_metric"].Sink)
 		assert.IsType(t, &metrics.GaugeSink{}, test.engine.MetricsEngine.ObservedMetrics["my_metric{a:1}"].Sink)
@@ -347,8 +371,8 @@ func TestEngine_processSamples(t *testing.T) {
 func TestEngineThresholdsWillAbort(t *testing.T) {
 	t.Parallel()
 
-	registry := metrics.NewRegistry()
-	metric, err := registry.NewMetric("my_metric", metrics.Gauge)
+	piState := getTestPreInitState(t)
+	metric, err := piState.Registry.NewMetric("my_metric", metrics.Gauge)
 	require.NoError(t, err)
 
 	// The incoming samples for the metric set it to 1.25. Considering
@@ -364,14 +388,19 @@ func TestEngineThresholdsWillAbort(t *testing.T) {
 	done := make(chan struct{})
 	runner := &minirunner.MiniRunner{
 		Fn: func(ctx context.Context, _ *lib.State, out chan<- metrics.SampleContainer) error {
-			out <- metrics.Sample{Metric: metric, Value: 1.25, Tags: metrics.IntoSampleTags(&map[string]string{"a": "1"})}
+			out <- metrics.Sample{
+				TimeSeries: metrics.TimeSeries{
+					Metric: metric,
+					Tags:   piState.Registry.RootTagSet().WithTagsFromMap(map[string]string{"a": "1"}),
+				},
+				Time:  time.Now(),
+				Value: 1.25,
+			}
 			close(done)
 			return nil
 		},
 	}
-	test := newTestEngineWithRegistry(t, nil, runner, nil, lib.Options{
-		Thresholds: thresholds,
-	}, registry)
+	test := newTestEngineWithTestPreInitState(t, nil, runner, nil, lib.Options{Thresholds: thresholds}, piState)
 
 	go func() {
 		assert.NoError(t, test.run())
@@ -390,8 +419,8 @@ func TestEngineThresholdsWillAbort(t *testing.T) {
 func TestEngineAbortedByThresholds(t *testing.T) {
 	t.Parallel()
 
-	registry := metrics.NewRegistry()
-	metric, err := registry.NewMetric("my_metric", metrics.Gauge)
+	piState := getTestPreInitState(t)
+	metric, err := piState.Registry.NewMetric("my_metric", metrics.Gauge)
 	require.NoError(t, err)
 
 	// The MiniRunner sets the value of the metric to 1.25. Considering
@@ -408,14 +437,21 @@ func TestEngineAbortedByThresholds(t *testing.T) {
 	done := make(chan struct{})
 	runner := &minirunner.MiniRunner{
 		Fn: func(ctx context.Context, _ *lib.State, out chan<- metrics.SampleContainer) error {
-			out <- metrics.Sample{Metric: metric, Value: 1.25, Tags: metrics.IntoSampleTags(&map[string]string{"a": "1"})}
+			out <- metrics.Sample{
+				TimeSeries: metrics.TimeSeries{
+					Metric: metric,
+					Tags:   piState.Registry.RootTagSet().WithTagsFromMap(map[string]string{"a": "1"}),
+				},
+				Time:  time.Now(),
+				Value: 1.25,
+			}
 			<-ctx.Done()
 			close(done)
 			return nil
 		},
 	}
 
-	test := newTestEngineWithRegistry(t, nil, runner, nil, lib.Options{Thresholds: thresholds}, registry)
+	test := newTestEngineWithTestPreInitState(t, nil, runner, nil, lib.Options{Thresholds: thresholds}, piState)
 	defer test.wait()
 
 	go func() {
@@ -465,12 +501,12 @@ func TestEngine_processThresholds(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			registry := metrics.NewRegistry()
-			gaugeMetric, err := registry.NewMetric("my_metric", metrics.Gauge)
+			piState := getTestPreInitState(t)
+			gaugeMetric, err := piState.Registry.NewMetric("my_metric", metrics.Gauge)
 			require.NoError(t, err)
-			counterMetric, err := registry.NewMetric("used_counter", metrics.Counter)
+			counterMetric, err := piState.Registry.NewMetric("used_counter", metrics.Counter)
 			require.NoError(t, err)
-			_, err = registry.NewMetric("unused_counter", metrics.Counter)
+			_, err = piState.Registry.NewMetric("unused_counter", metrics.Counter)
 			require.NoError(t, err)
 
 			thresholds := make(map[string]metrics.Thresholds, len(data.ths))
@@ -481,15 +517,31 @@ func TestEngine_processThresholds(t *testing.T) {
 				thresholds[m] = ths
 			}
 
-			runner := &minirunner.MiniRunner{}
-			test := newTestEngineWithRegistry(
-				t, nil, runner, nil, lib.Options{Thresholds: thresholds}, registry,
+			test := newTestEngineWithTestPreInitState(
+				t, nil, nil, nil, lib.Options{Thresholds: thresholds}, piState,
 			)
+
+			tag1 := piState.Registry.RootTagSet().With("a", "1")
+			tag2 := piState.Registry.RootTagSet().With("b", "1")
 
 			test.engine.OutputManager.AddMetricSamples(
 				[]metrics.SampleContainer{
-					metrics.Sample{Metric: gaugeMetric, Value: 1.25, Tags: metrics.IntoSampleTags(&map[string]string{"a": "1"})},
-					metrics.Sample{Metric: counterMetric, Value: 2, Tags: metrics.IntoSampleTags(&map[string]string{"b": "1"})},
+					metrics.Sample{
+						TimeSeries: metrics.TimeSeries{
+							Metric: gaugeMetric,
+							Tags:   tag1,
+						},
+						Time:  time.Now(),
+						Value: 1.25,
+					},
+					metrics.Sample{
+						TimeSeries: metrics.TimeSeries{
+							Metric: counterMetric,
+							Tags:   tag2,
+						},
+						Time:  time.Now(),
+						Value: 2,
+					},
 				},
 			)
 
@@ -593,14 +645,8 @@ func TestSentReceivedMetrics(t *testing.T) {
 	}
 
 	runTest := func(t *testing.T, ts testScript, tc testCase, noConnReuse bool) (float64, float64) {
-		registry := metrics.NewRegistry()
-		builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 		r, err := js.New(
-			&lib.RuntimeState{
-				Logger:         testutils.NewLogger(t),
-				BuiltinMetrics: builtinMetrics,
-				Registry:       registry,
-			},
+			getTestPreInitState(t),
 			&loader.SourceData{URL: &url.URL{Path: "/script.js"}, Data: []byte(ts.Code)},
 			nil,
 		)
@@ -676,11 +722,17 @@ func TestSentReceivedMetrics(t *testing.T) {
 
 func TestRunTags(t *testing.T) {
 	t.Parallel()
+
+	expectedRunTags := map[string]string{"foo": "bar", "test": "mest", "over": "written"}
+
+	// it copies the map so in the case the runner will overwrite
+	// some run tags' values it doesn't affect the assertion.
+	runTags := make(map[string]string)
+	for k, v := range expectedRunTags {
+		runTags[k] = v
+	}
+
 	tb := httpmultibin.NewHTTPMultiBin(t)
-
-	runTagsMap := map[string]string{"foo": "bar", "test": "mest", "over": "written"}
-	runTags := metrics.NewSampleTags(runTagsMap)
-
 	script := []byte(tb.Replacer.Replace(`
 		import http from "k6/http";
 		import ws from "k6/ws";
@@ -732,14 +784,8 @@ func TestRunTags(t *testing.T) {
 		}
 	`))
 
-	registry := metrics.NewRegistry()
-	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r, err := js.New(
-		&lib.RuntimeState{
-			Logger:         testutils.NewLogger(t),
-			BuiltinMetrics: builtinMetrics,
-			Registry:       registry,
-		},
+		getTestPreInitState(t),
 		&loader.SourceData{URL: &url.URL{Path: "/script.js"}, Data: script},
 		nil,
 	)
@@ -774,14 +820,14 @@ func TestRunTags(t *testing.T) {
 	getExpectedOverVal := func(metricName string) string {
 		for _, sysMetric := range systemMetrics {
 			if sysMetric == metricName {
-				return runTagsMap["over"]
+				return expectedRunTags["over"]
 			}
 		}
 		return "the rainbow"
 	}
 
 	for _, s := range mockOutput.Samples {
-		for key, expVal := range runTagsMap {
+		for key, expVal := range expectedRunTags {
 			val, ok := s.Tags.Get(key)
 
 			if key == "over" {
@@ -789,75 +835,8 @@ func TestRunTags(t *testing.T) {
 			}
 
 			assert.True(t, ok)
-			assert.Equalf(t, expVal, val, "Wrong tag value in sample for metric %#v", s.Metric)
+			assert.Equalf(t, expVal, val, "Wrong tag value in sample - expected: %v got: %v metric %#v", expVal, val, s.Metric)
 		}
-	}
-}
-
-func TestSetupTeardownThresholds(t *testing.T) {
-	t.Parallel()
-	tb := httpmultibin.NewHTTPMultiBin(t)
-
-	script := []byte(tb.Replacer.Replace(`
-		import http from "k6/http";
-		import { check } from "k6";
-		import { Counter } from "k6/metrics";
-
-		let statusCheck = { "status is 200": (r) => r.status === 200 }
-		let myCounter = new Counter("setup_teardown");
-
-		export let options = {
-			iterations: 5,
-			thresholds: {
-				"setup_teardown": ["count == 2"],
-				"iterations": ["count == 5"],
-				"http_reqs": ["count == 7"],
-			},
-		};
-
-		export function setup() {
-			check(http.get("HTTPBIN_IP_URL"), statusCheck) && myCounter.add(1);
-		};
-
-		export default function () {
-			check(http.get("HTTPBIN_IP_URL"), statusCheck);
-		};
-
-		export function teardown() {
-			check(http.get("HTTPBIN_IP_URL"), statusCheck) && myCounter.add(1);
-		};
-	`))
-
-	registry := metrics.NewRegistry()
-	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	runner, err := js.New(
-		&lib.RuntimeState{
-			Logger:         testutils.NewLogger(t),
-			BuiltinMetrics: builtinMetrics,
-			Registry:       registry,
-		},
-		&loader.SourceData{URL: &url.URL{Path: "/script.js"}, Data: script},
-		nil,
-	)
-	require.NoError(t, err)
-
-	test := newTestEngine(t, nil, runner, nil, lib.Options{
-		SystemTags:      &metrics.DefaultSystemTagSet,
-		SetupTimeout:    types.NullDurationFrom(3 * time.Second),
-		TeardownTimeout: types.NullDurationFrom(3 * time.Second),
-		VUs:             null.IntFrom(3),
-	})
-	defer test.wait()
-
-	errC := make(chan error)
-	go func() { errC <- test.run() }()
-
-	select {
-	case <-time.After(10 * time.Second):
-		t.Fatal("Test timed out")
-	case err := <-errC:
-		require.NoError(t, err)
-		require.False(t, test.engine.IsTainted())
 	}
 }
 
@@ -882,14 +861,8 @@ func TestSetupException(t *testing.T) {
 		        throw new Error("baz");
 			}
 	`), 0x666))
-	registry := metrics.NewRegistry()
-	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	runner, err := js.New(
-		&lib.RuntimeState{
-			Logger:         testutils.NewLogger(t),
-			BuiltinMetrics: builtinMetrics,
-			Registry:       registry,
-		},
+		getTestPreInitState(t),
 		&loader.SourceData{URL: &url.URL{Scheme: "file", Path: "/script.js"}, Data: script},
 		map[string]afero.Fs{"file": memfs},
 	)
@@ -935,15 +908,9 @@ func TestVuInitException(t *testing.T) {
 		}
 	`)
 
-	logger := testutils.NewLogger(t)
-	registry := metrics.NewRegistry()
-	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
+	piState := getTestPreInitState(t)
 	runner, err := js.New(
-		&lib.RuntimeState{
-			Logger:         testutils.NewLogger(t),
-			BuiltinMetrics: builtinMetrics,
-			Registry:       registry,
-		},
+		piState,
 		&loader.SourceData{URL: &url.URL{Scheme: "file", Path: "/script.js"}, Data: script},
 		nil,
 	)
@@ -951,12 +918,12 @@ func TestVuInitException(t *testing.T) {
 
 	opts, err := executor.DeriveScenariosFromShortcuts(runner.GetOptions(), nil)
 	require.NoError(t, err)
-	require.Empty(t, opts.Validate())
-	require.NoError(t, runner.SetOptions(opts))
 
-	execScheduler, err := local.NewExecutionScheduler(runner, builtinMetrics, logger)
+	testState := getTestRunState(t, piState, opts, runner)
+
+	execScheduler, err := local.NewExecutionScheduler(testState)
 	require.NoError(t, err)
-	engine, err := NewEngine(execScheduler, opts, lib.RuntimeOptions{}, nil, logger, registry)
+	engine, err := NewEngine(testState, execScheduler, nil)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -967,7 +934,7 @@ func TestVuInitException(t *testing.T) {
 
 	var exception errext.Exception
 	require.ErrorAs(t, err, &exception)
-	assert.Equal(t, "Error: oops in 2\n\tat file:///script.js:10:9(30)\n\tat native\n", err.Error())
+	assert.Equal(t, "Error: oops in 2\n\tat file:///script.js:10:9(29)\n\tat native\n", err.Error())
 
 	var errWithHint errext.HasHint
 	require.ErrorAs(t, err, &errWithHint)
@@ -1009,14 +976,8 @@ func TestEmittedMetricsWhenScalingDown(t *testing.T) {
 		};
 	`))
 
-	registry := metrics.NewRegistry()
-	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	runner, err := js.New(
-		&lib.RuntimeState{
-			Logger:         testutils.NewLogger(t),
-			BuiltinMetrics: builtinMetrics,
-			Registry:       registry,
-		},
+		getTestPreInitState(t),
 		&loader.SourceData{URL: &url.URL{Path: "/script.js"}, Data: script},
 		nil,
 	)
@@ -1098,14 +1059,8 @@ func TestMetricsEmission(t *testing.T) {
 			if !isWindows {
 				t.Parallel()
 			}
-			registry := metrics.NewRegistry()
-			builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 			runner, err := js.New(
-				&lib.RuntimeState{
-					Logger:         testutils.NewLogger(t),
-					BuiltinMetrics: builtinMetrics,
-					Registry:       registry,
-				},
+				getTestPreInitState(t),
 				&loader.SourceData{URL: &url.URL{Path: "/script.js"}, Data: []byte(fmt.Sprintf(`
 				import { sleep } from "k6";
 				import { Counter } from "k6/metrics";
@@ -1210,14 +1165,8 @@ func TestMinIterationDurationInSetupTeardownStage(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			registry := metrics.NewRegistry()
-			builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 			runner, err := js.New(
-				&lib.RuntimeState{
-					Logger:         testutils.NewLogger(t),
-					BuiltinMetrics: builtinMetrics,
-					Registry:       registry,
-				},
+				getTestPreInitState(t),
 				&loader.SourceData{URL: &url.URL{Path: "/script.js"}, Data: []byte(tc.script)},
 				nil,
 			)
@@ -1242,8 +1191,8 @@ func TestMinIterationDurationInSetupTeardownStage(t *testing.T) {
 func TestEngineRunsTeardownEvenAfterTestRunIsAborted(t *testing.T) {
 	t.Parallel()
 
-	registry := metrics.NewRegistry()
-	testMetric, err := registry.NewMetric("teardown_metric", metrics.Counter)
+	piState := getTestPreInitState(t)
+	testMetric, err := piState.Registry.NewMetric("teardown_metric", metrics.Counter)
 	require.NoError(t, err)
 
 	var test *testStruct
@@ -1253,15 +1202,22 @@ func TestEngineRunsTeardownEvenAfterTestRunIsAborted(t *testing.T) {
 			return nil
 		},
 		TeardownFn: func(_ context.Context, out chan<- metrics.SampleContainer) error {
-			out <- metrics.Sample{Metric: testMetric, Value: 1}
+			out <- metrics.Sample{
+				TimeSeries: metrics.TimeSeries{
+					Metric: testMetric,
+					Tags:   piState.Registry.RootTagSet(),
+				},
+				Time:  time.Now(),
+				Value: 1,
+			}
 			return nil
 		},
 	}
 
 	mockOutput := mockoutput.New()
-	test = newTestEngineWithRegistry(t, nil, runner, []output.Output{mockOutput}, lib.Options{
+	test = newTestEngineWithTestPreInitState(t, nil, runner, []output.Output{mockOutput}, lib.Options{
 		VUs: null.IntFrom(1), Iterations: null.IntFrom(1),
-	}, registry)
+	}, piState)
 
 	assert.NoError(t, test.run())
 	test.wait()
@@ -1328,14 +1284,13 @@ func TestActiveVUsCount(t *testing.T) {
 	rtOpts := lib.RuntimeOptions{CompatibilityMode: null.StringFrom("base")}
 
 	registry := metrics.NewRegistry()
-	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	runner, err := js.New(
-		&lib.RuntimeState{
-			Logger:         logger,
-			BuiltinMetrics: builtinMetrics,
-			Registry:       registry,
-			RuntimeOptions: rtOpts,
-		}, &loader.SourceData{URL: &url.URL{Path: "/script.js"}, Data: script}, nil)
+	piState := &lib.TestPreInitState{
+		Logger:         logger,
+		Registry:       registry,
+		BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
+		RuntimeOptions: rtOpts,
+	}
+	runner, err := js.New(piState, &loader.SourceData{URL: &url.URL{Path: "/script.js"}, Data: script}, nil)
 	require.NoError(t, err)
 
 	mockOutput := mockoutput.New()
@@ -1346,11 +1301,11 @@ func TestActiveVUsCount(t *testing.T) {
 		MetricSamplesBufferSize: null.NewInt(200, false),
 	}.Apply(runner.GetOptions()), nil)
 	require.NoError(t, err)
-	require.Empty(t, opts.Validate())
-	require.NoError(t, runner.SetOptions(opts))
-	execScheduler, err := local.NewExecutionScheduler(runner, builtinMetrics, logger)
+
+	testState := getTestRunState(t, piState, opts, runner)
+	execScheduler, err := local.NewExecutionScheduler(testState)
 	require.NoError(t, err)
-	engine, err := NewEngine(execScheduler, opts, rtOpts, []output.Output{mockOutput}, logger, registry)
+	engine, err := NewEngine(testState, execScheduler, []output.Output{mockOutput})
 	require.NoError(t, err)
 	require.NoError(t, engine.OutputManager.StartOutputs())
 	run, waitFn, err := engine.Init(ctx, ctx) // no need for 2 different contexts

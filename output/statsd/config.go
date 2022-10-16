@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package statsd
 
 import (
@@ -33,15 +13,15 @@ import (
 
 // config defines the StatsD configuration.
 type config struct {
-	Addr         null.String        `json:"addr,omitempty" envconfig:"K6_STATSD_ADDR"`
-	BufferSize   null.Int           `json:"bufferSize,omitempty" envconfig:"K6_STATSD_BUFFER_SIZE"`
-	Namespace    null.String        `json:"namespace,omitempty" envconfig:"K6_STATSD_NAMESPACE"`
-	PushInterval types.NullDuration `json:"pushInterval,omitempty" envconfig:"K6_STATSD_PUSH_INTERVAL"`
-	TagBlocklist metrics.TagSet     `json:"tagBlocklist,omitempty" envconfig:"K6_STATSD_TAG_BLOCKLIST"`
-	EnableTags   null.Bool          `json:"enableTags,omitempty" envconfig:"K6_STATSD_ENABLE_TAGS"`
+	Addr         null.String         `json:"addr,omitempty" envconfig:"K6_STATSD_ADDR"`
+	BufferSize   null.Int            `json:"bufferSize,omitempty" envconfig:"K6_STATSD_BUFFER_SIZE"`
+	Namespace    null.String         `json:"namespace,omitempty" envconfig:"K6_STATSD_NAMESPACE"`
+	PushInterval types.NullDuration  `json:"pushInterval,omitempty" envconfig:"K6_STATSD_PUSH_INTERVAL"`
+	TagBlocklist metrics.EnabledTags `json:"tagBlocklist,omitempty" envconfig:"K6_STATSD_TAG_BLOCKLIST"`
+	EnableTags   null.Bool           `json:"enableTags,omitempty" envconfig:"K6_STATSD_ENABLE_TAGS"`
 }
 
-func processTags(t metrics.TagSet, tags map[string]string) []string {
+func processTags(t metrics.EnabledTags, tags map[string]string) []string {
 	var res []string
 	for key, value := range tags {
 		if value != "" && !t[key] {

@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package http
 
 import (
@@ -140,7 +120,7 @@ func TestResponse(t *testing.T) {
 			if (res.body.indexOf("Herman Melville - Moby-Dick") == -1) { throw new Error("wrong body: " + res.body); }
 		`))
 		assert.NoError(t, err)
-		assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/html"), "", 200, "")
+		assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/html"), 200, "")
 
 		t.Run("html", func(t *testing.T) {
 			_, err := rt.RunString(`
@@ -168,10 +148,14 @@ func TestResponse(t *testing.T) {
 			if assert.NoError(t, err) {
 				old := state.Group
 				state.Group = g
-				state.Tags.Set("group", g.Path)
+				state.Tags.Modify(func(currentTags *metrics.TagSet) *metrics.TagSet {
+					return currentTags.With("group", g.Path)
+				})
 				defer func() {
 					state.Group = old
-					state.Tags.Set("group", old.Path)
+					state.Tags.Modify(func(currentTags *metrics.TagSet) *metrics.TagSet {
+						return currentTags.With("group", old.Path)
+					})
 				}()
 			}
 
@@ -181,7 +165,7 @@ func TestResponse(t *testing.T) {
 				if (res.body.indexOf("Herman Melville - Moby-Dick") == -1) { throw new Error("wrong body: " + res.body); }
 			`))
 			assert.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/html"), "", 200, "::my group")
+			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/html"), 200, "::my group")
 		})
 
 		t.Run("NoResponseBody", func(t *testing.T) {
@@ -199,7 +183,7 @@ func TestResponse(t *testing.T) {
 			if (res.json().args.b != "2") { throw new Error("wrong ?b: " + res.json().args.b); }
 		`))
 		assert.NoError(t, err)
-		assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/get?a=1&b=2"), "", 200, "")
+		assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/get?a=1&b=2"), 200, "")
 
 		t.Run("Invalid", func(t *testing.T) {
 			_, err := rt.RunString(sr(`http.request("GET", "HTTPBIN_URL/html").json();`))
@@ -260,7 +244,7 @@ func TestResponse(t *testing.T) {
 				{ throw new Error("Expected 'Dale', but got: " + value); }
 		`))
 		assert.NoError(t, err)
-		assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/json"), "", 200, "")
+		assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/json"), 200, "")
 	})
 
 	t.Run("SubmitForm", func(t *testing.T) {
@@ -280,7 +264,7 @@ func TestResponse(t *testing.T) {
 				) { throw new Error("incorrect body: " + JSON.stringify(data, null, 4) ); }
 			`))
 			assert.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "POST", sr("HTTPBIN_URL/post"), "", 200, "")
+			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "POST", sr("HTTPBIN_URL/post"), 200, "")
 		})
 
 		t.Run("withFields", func(t *testing.T) {
@@ -299,7 +283,7 @@ func TestResponse(t *testing.T) {
 				) { throw new Error("incorrect body: " + JSON.stringify(data, null, 4) ); }
 			`))
 			assert.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "POST", sr("HTTPBIN_URL/post"), "", 200, "")
+			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "POST", sr("HTTPBIN_URL/post"), 200, "")
 		})
 
 		t.Run("withRequestParams", func(t *testing.T) {
@@ -312,7 +296,7 @@ func TestResponse(t *testing.T) {
 				if (headers["My-Fancy-Header"][0] !== "SomeValue" ) { throw new Error("incorrect headers: " + JSON.stringify(headers)); }
 			`))
 			assert.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "POST", sr("HTTPBIN_URL/post"), "", 200, "")
+			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "POST", sr("HTTPBIN_URL/post"), 200, "")
 		})
 
 		t.Run("withFormSelector", func(t *testing.T) {
@@ -331,7 +315,7 @@ func TestResponse(t *testing.T) {
 				) { throw new Error("incorrect body: " + JSON.stringify(data, null, 4) ); }
 			`))
 			assert.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "POST", sr("HTTPBIN_URL/post"), "", 200, "")
+			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "POST", sr("HTTPBIN_URL/post"), 200, "")
 		})
 
 		t.Run("withNonExistentForm", func(t *testing.T) {
@@ -359,7 +343,7 @@ func TestResponse(t *testing.T) {
 				) { throw new Error("incorrect body: " + JSON.stringify(data, null, 4) ); }
 			`))
 			require.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/myforms/get"), "", 200, "")
+			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/myforms/get"), 200, "")
 		})
 	})
 
@@ -372,7 +356,7 @@ func TestResponse(t *testing.T) {
 				if (res.status != 200) { throw new Error("wrong status: " + res.status); }
 			`))
 			assert.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/links/10/1"), "", 200, "")
+			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/links/10/1"), 200, "")
 		})
 
 		t.Run("withSelector", func(t *testing.T) {
@@ -383,7 +367,7 @@ func TestResponse(t *testing.T) {
 				if (res.status != 200) { throw new Error("wrong status: " + res.status); }
 			`))
 			assert.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/links/10/4"), "", 200, "")
+			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/links/10/4"), 200, "")
 		})
 
 		t.Run("withNonExistentLink", func(t *testing.T) {
@@ -406,7 +390,7 @@ func TestResponse(t *testing.T) {
 				if (headers["My-Fancy-Header"][0] !== "SomeValue" ) { throw new Error("incorrect headers: " + JSON.stringify(headers)); }
 			`))
 			assert.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/get"), "", 200, "")
+			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/get"), 200, "")
 		})
 	})
 }

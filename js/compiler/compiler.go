@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2017 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package compiler
 
 import (
@@ -52,8 +32,8 @@ var (
 			// "transform-es2015-function-name", // in goja
 			// []interface{}{"transform-es2015-arrow-functions", map[string]interface{}{"spec": false}}, // in goja
 			// "transform-es2015-block-scoped-functions", // in goja
-			[]interface{}{"transform-es2015-classes", map[string]interface{}{"loose": false}},
-			"transform-es2015-object-super",
+			// []interface{}{"transform-es2015-classes", map[string]interface{}{"loose": false}}, // in goja
+			// "transform-es2015-object-super", // in goja
 			// "transform-es2015-shorthand-properties", // in goja
 			// "transform-es2015-duplicate-keys", // in goja
 			// []interface{}{"transform-es2015-computed-properties", map[string]interface{}{"loose": false}}, // in goja

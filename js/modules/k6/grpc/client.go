@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
@@ -75,6 +76,38 @@ func (c *Client) Load(importPaths []string, filenames ...string) ([]MethodInfo, 
 	return c.convertToMethodInfo(fdset)
 }
 
+// LoadProtoset will parse the given protoset file (serialized FileDescriptorSet) and make the file
+// descriptors available to request.
+func (c *Client) LoadProtoset(protosetPath string) ([]MethodInfo, error) {
+	if c.vu.State() != nil {
+		return nil, errors.New("load must be called in the init context")
+	}
+
+	initEnv := c.vu.InitEnv()
+	if initEnv == nil {
+		return nil, errors.New("missing init environment")
+	}
+
+	absFilePath := initEnv.GetAbsFilePath(protosetPath)
+	fdsetFile, err := initEnv.FileSystems["file"].Open(absFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't open protoset: %w", err)
+	}
+
+	defer func() { _ = fdsetFile.Close() }()
+	fdsetBytes, err := io.ReadAll(fdsetFile)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't read protoset: %w", err)
+	}
+
+	fdset := &descriptorpb.FileDescriptorSet{}
+	if err = proto.Unmarshal(fdsetBytes, fdset); err != nil {
+		return nil, fmt.Errorf("couldn't unmarshal protoset file %s: %w", protosetPath, err)
+	}
+
+	return c.convertToMethodInfo(fdset)
+}
+
 // Connect is a block dial to the gRPC server at the given address (host:port)
 func (c *Client) Connect(addr string, params map[string]interface{}) (bool, error) {
 	state := c.vu.State()
@@ -84,7 +117,7 @@ func (c *Client) Connect(addr string, params map[string]interface{}) (bool, erro
 
 	p, err := c.parseConnectParams(params)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("invalid grpc.connect() parameters: %w", err)
 	}
 
 	opts := grpcext.DefaultOptions(c.vu)
@@ -107,6 +140,14 @@ func (c *Client) Connect(addr string, params map[string]interface{}) (bool, erro
 
 	ctx, cancel := context.WithTimeout(c.vu.Context(), p.Timeout)
 	defer cancel()
+
+	if p.MaxReceiveSize > 0 {
+		opts = append(opts, grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(int(p.MaxReceiveSize))))
+	}
+
+	if p.MaxSendSize > 0 {
+		opts = append(opts, grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(int(p.MaxSendSize))))
+	}
 
 	c.addr = addr
 	c.conn, err = grpcext.Dial(ctx, addr, opts...)
@@ -133,7 +174,7 @@ func (c *Client) Connect(addr string, params map[string]interface{}) (bool, erro
 func (c *Client) Invoke(
 	method string,
 	req goja.Value,
-	params map[string]interface{},
+	params goja.Value,
 ) (*grpcext.Response, error) {
 	state := c.vu.State()
 	if state == nil {
@@ -153,11 +194,14 @@ func (c *Client) Invoke(
 		return nil, fmt.Errorf("method %q not found in file descriptors", method)
 	}
 
-	p, err := c.parseParams(params)
+	p, err := c.parseInvokeParams(params)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid grpc.invoke() parameters: %w", err)
 	}
 
+	if req == nil {
+		return nil, errors.New("request cannot be nil")
+	}
 	b, err := req.ToObject(c.vu.Runtime()).MarshalJSON()
 	if err != nil {
 		return nil, fmt.Errorf("unable to serialise request object: %w", err)
@@ -171,31 +215,26 @@ func (c *Client) Invoke(
 	ctx, cancel := context.WithTimeout(c.vu.Context(), p.Timeout)
 	defer cancel()
 
-	tags := state.CloneTags()
-	for k, v := range p.Tags {
-		tags[k] = v
-	}
-
 	if state.Options.SystemTags.Has(metrics.TagURL) {
-		tags["url"] = fmt.Sprintf("%s%s", c.addr, method)
+		p.Tags = p.Tags.With("url", fmt.Sprintf("%s%s", c.addr, method))
 	}
 	parts := strings.Split(method[1:], "/")
 	if state.Options.SystemTags.Has(metrics.TagService) {
-		tags["service"] = parts[0]
+		p.Tags = p.Tags.With("service", parts[0])
 	}
 	if state.Options.SystemTags.Has(metrics.TagMethod) {
-		tags["method"] = parts[1]
+		p.Tags = p.Tags.With("method", parts[1])
 	}
 
 	// Only set the name system tag if the user didn't explicitly set it beforehand
-	if _, ok := tags["name"]; !ok && state.Options.SystemTags.Has(metrics.TagName) {
-		tags["name"] = method
+	if _, ok := p.Tags.Get("name"); !ok && state.Options.SystemTags.Has(metrics.TagName) {
+		p.Tags = p.Tags.With("name", method)
 	}
 
 	reqmsg := grpcext.Request{
 		MethodDescriptor: methodDesc,
 		Message:          b,
-		Tags:             tags,
+		Tags:             p.Tags,
 	}
 
 	return c.conn.Invoke(ctx, method, md, reqmsg)
@@ -278,67 +317,68 @@ func (c *Client) convertToMethodInfo(fdset *descriptorpb.FileDescriptorSet) ([]M
 	return rtn, nil
 }
 
-type params struct {
+type invokeParams struct {
 	Metadata map[string]string
-	Tags     map[string]string
+	Tags     *metrics.TagSet
 	Timeout  time.Duration
 }
 
-func (c *Client) parseParams(raw map[string]interface{}) (params, error) {
-	p := params{
+func (c *Client) parseInvokeParams(paramsVal goja.Value) (*invokeParams, error) {
+	result := &invokeParams{
 		Timeout: 1 * time.Minute,
+		Tags:    c.vu.State().Tags.GetCurrentValues(),
 	}
-	for k, v := range raw {
+	if paramsVal == nil || goja.IsUndefined(paramsVal) || goja.IsNull(paramsVal) {
+		return result, nil
+	}
+	rt := c.vu.Runtime()
+	params := paramsVal.ToObject(rt)
+	for _, k := range params.Keys() {
 		switch k {
 		case "headers":
 			c.vu.State().Logger.Warn("The headers property is deprecated, replace it with the metadata property, please.")
 			fallthrough
 		case "metadata":
-			p.Metadata = make(map[string]string)
-
+			result.Metadata = make(map[string]string)
+			v := params.Get(k).Export()
 			rawHeaders, ok := v.(map[string]interface{})
 			if !ok {
-				return p, errors.New("metadata must be an object with key-value pairs")
+				return result, errors.New("metadata must be an object with key-value pairs")
 			}
 			for hk, kv := range rawHeaders {
 				// TODO(rogchap): Should we manage a string slice?
 				strval, ok := kv.(string)
 				if !ok {
-					return p, fmt.Errorf("metadata %q value must be a string", hk)
+					return result, fmt.Errorf("metadata %q value must be a string", hk)
 				}
-				p.Metadata[hk] = strval
+				result.Metadata[hk] = strval
 			}
 		case "tags":
-			p.Tags = make(map[string]string)
-
-			rawTags, ok := v.(map[string]interface{})
-			if !ok {
-				return p, errors.New("tags must be an object with key-value pairs")
+			newTags, err := common.ApplyCustomUserTags(rt, result.Tags, params.Get(k))
+			if err != nil {
+				return result, fmt.Errorf("metric tags: %w", err)
 			}
-			for tk, tv := range rawTags {
-				strVal, ok := tv.(string)
-				if !ok {
-					return p, fmt.Errorf("tag %q value must be a string", tk)
-				}
-				p.Tags[tk] = strVal
-			}
+			result.Tags = newTags
 		case "timeout":
 			var err error
-			p.Timeout, err = types.GetDurationValue(v)
+			v := params.Get(k).Export()
+			result.Timeout, err = types.GetDurationValue(v)
 			if err != nil {
-				return p, fmt.Errorf("invalid timeout value: %w", err)
+				return result, fmt.Errorf("invalid timeout value: %w", err)
 			}
 		default:
-			return p, fmt.Errorf("unknown param: %q", k)
+			return result, fmt.Errorf("unknown param: %q", k)
 		}
 	}
-	return p, nil
+	return result, nil
 }
 
 type connectParams struct {
 	IsPlaintext           bool
 	UseReflectionProtocol bool
 	Timeout               time.Duration
+	MaxReceiveSize        int64
+	MaxSendSize           int64
 }
 
 func (c *Client) parseConnectParams(raw map[string]interface{}) (connectParams, error) {
@@ -346,6 +386,8 @@ func (c *Client) parseConnectParams(raw map[string]interface{}) (connectParams, 
 		IsPlaintext:           false,
 		UseReflectionProtocol: false,
 		Timeout:               time.Minute,
+		MaxReceiveSize:        0,
+		MaxSendSize:           0,
 	}
 	for k, v := range raw {
 		switch k {
@@ -366,6 +408,24 @@ func (c *Client) parseConnectParams(raw map[string]interface{}) (connectParams, 
 			params.UseReflectionProtocol, ok = v.(bool)
 			if !ok {
 				return params, fmt.Errorf("invalid reflect value: '%#v', it needs to be boolean", v)
+			}
+		case "maxReceiveSize":
+			var ok bool
+			params.MaxReceiveSize, ok = v.(int64)
+			if !ok {
+				return params, fmt.Errorf("invalid maxReceiveSize value: '%#v', it needs to be an integer", v)
+			}
+			if params.MaxReceiveSize < 0 {
+				return params, fmt.Errorf("invalid maxReceiveSize value: '%#v, it needs to be a positive integer", v)
+			}
+		case "maxSendSize":
+			var ok bool
+			params.MaxSendSize, ok = v.(int64)
+			if !ok {
+				return params, fmt.Errorf("invalid maxSendSize value: '%#v', it needs to be an integer", v)
+			}
+			if params.MaxSendSize < 0 {
+				return params, fmt.Errorf("invalid maxSendSize value: '%#v, it needs to be a positive integer", v)
 			}
 
 		default:

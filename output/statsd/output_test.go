@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package statsd
 
 import (
@@ -62,7 +42,7 @@ func TestStatsdOutput(t *testing.T) {
 
 func TestStatsdEnabledTags(t *testing.T) {
 	t.Parallel()
-	tagMap := metrics.TagSet{"tag1": true, "tag2": true}
+	tagMap := metrics.EnabledTags{"tag1": true, "tag2": true}
 
 	baseTest(t, func(
 		logger logrus.FieldLogger, addr, namespace null.String, bufferSize null.Int, pushInterval types.NullDuration,
@@ -88,7 +68,7 @@ func TestStatsdEnabledTags(t *testing.T) {
 			for j, sample := range container.GetSamples() {
 				lines++
 				var (
-					expectedTagList    = processTags(tagMap, sample.GetTags().CloneTags())
+					expectedTagList    = processTags(tagMap, sample.GetTags().Map())
 					expectedOutputLine = expectedOutputLines[i*j+i]
 					outputLine         = outputLines[i*j+i]
 					outputWithoutTags  = outputLine

@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2018 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package k6_test
 
 import (
@@ -119,7 +99,7 @@ func TestSetupDataMarshalling(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	runner, err := js.New(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -135,16 +115,13 @@ func TestSetupDataMarshalling(t *testing.T) {
 		SetupTimeout: types.NullDurationFrom(5 * time.Second),
 		Hosts:        tb.Dialer.Hosts,
 	})
-
 	require.NoError(t, err)
 
 	samples := make(chan<- metrics.SampleContainer, 100)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if !assert.NoError(t, runner.Setup(ctx, samples)) {
-		return
-	}
+	require.NoError(t, runner.Setup(ctx, samples))
 	initVU, err := runner.NewVU(1, 1, samples)
 	if assert.NoError(t, err) {
 		vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})

@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package html
 
 import (
@@ -842,7 +822,7 @@ func TestParseHTML(t *testing.T) {
 			v, err := rt.RunString(`doc.find("body").children().get(1)`)
 			if assert.NoError(t, err) {
 				elem, _ := v.Export().(Element)
-				assert.Contains(t, elem.InnerHTML(), "Lorem ipsum dolor sit amet")
+				assert.Contains(t, elem.InnerHTML().Export(), "Lorem ipsum dolor sit amet")
 			}
 		})
 		t.Run("-ve index", func(t *testing.T) {

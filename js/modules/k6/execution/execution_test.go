@@ -25,171 +25,128 @@ import (
 	"gopkg.in/guregu/null.v3"
 )
 
-type execEnv struct {
-	Runtime *goja.Runtime
-	Module  *ModuleInstance
-	LogHook *testutils.SimpleLogrusHook
+func setupTagsExecEnv(t *testing.T) *modulestest.Runtime {
+	testRuntime := modulestest.NewRuntime(t)
+	m, ok := New().NewModuleInstance(testRuntime.VU).(*ModuleInstance)
+	require.True(t, ok)
+	require.NoError(t, testRuntime.VU.Runtime().Set("exec", m.Exports().Default))
+
+	return testRuntime
 }
 
-func setupTagsExecEnv(t *testing.T) execEnv {
+func TestVUTagsGet(t *testing.T) {
+	t.Parallel()
+
+	tenv := setupTagsExecEnv(t)
+	tenv.MoveToVUContext(&lib.State{
+		Tags: lib.NewVUStateTags(metrics.NewRegistry().RootTagSet().With("vu", "42")),
+	})
+	tag, err := tenv.VU.Runtime().RunString(`exec.vu.tags["vu"]`)
+	require.NoError(t, err)
+	assert.Equal(t, "42", tag.String())
+
+	// not found
+	tag, err = tenv.VU.Runtime().RunString(`exec.vu.tags["not-existing-tag"]`)
+	require.NoError(t, err)
+	assert.Equal(t, "undefined", tag.String())
+}
+
+func TestVUTagsJSONEncoding(t *testing.T) {
+	t.Parallel()
+
+	tenv := setupTagsExecEnv(t)
+	tenv.MoveToVUContext(&lib.State{
+		Options: lib.Options{
+			SystemTags: metrics.NewSystemTagSet(metrics.TagVU),
+		},
+		Tags: lib.NewVUStateTags(metrics.NewRegistry().RootTagSet().With("vu", "42")),
+	})
+	tenv.VU.State().Tags.Modify(func(tags *metrics.TagSet) *metrics.TagSet {
+		return tags.With("custom-tag", "mytag1")
+	})
+
+	encoded, err := tenv.VU.Runtime().RunString(`JSON.stringify(exec.vu.tags)`)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"vu":"42","custom-tag":"mytag1"}`, encoded.String())
+}
+
+func TestVUTagsSetSuccessAccetedTypes(t *testing.T) {
+	t.Parallel()
+
+	// bool and numbers are implicitly converted into string
+
+	tests := map[string]struct {
+		v   interface{}
+		exp string
+	}{
+		"string": {v: `"tag1"`, exp: "tag1"},
+		"bool":   {v: true, exp: "true"},
+		"int":    {v: 101, exp: "101"},
+		"float":  {v: 3.14, exp: "3.14"},
+	}
+
+	tenv := setupTagsExecEnv(t)
+	tenv.MoveToVUContext(&lib.State{
+		Tags: lib.NewVUStateTags(metrics.NewRegistry().RootTagSet().With("vu", "42")),
+	})
+
+	for _, tc := range tests {
+		_, err := tenv.VU.Runtime().RunString(fmt.Sprintf(`exec.vu.tags["mytag"] = %v`, tc.v))
+		require.NoError(t, err)
+
+		val, err := tenv.VU.Runtime().RunString(`exec.vu.tags["mytag"]`)
+		require.NoError(t, err)
+
+		assert.Equal(t, tc.exp, val.String())
+	}
+}
+
+func TestVUTagsSuccessOverwriteSystemTag(t *testing.T) {
+	t.Parallel()
+
+	tenv := setupTagsExecEnv(t)
+	tenv.MoveToVUContext(&lib.State{
+		Tags: lib.NewVUStateTags(metrics.NewRegistry().RootTagSet().With("vu", "42")),
+	})
+
+	_, err := tenv.VU.Runtime().RunString(`exec.vu.tags["vu"] = "vu101"`)
+	require.NoError(t, err)
+	val, err := tenv.VU.Runtime().RunString(`exec.vu.tags["vu"]`)
+	require.NoError(t, err)
+	assert.Equal(t, "vu101", val.String())
+}
+
+func TestVUTagsErrorOutOnInvalidValues(t *testing.T) {
+	t.Parallel()
+
 	logHook := &testutils.SimpleLogrusHook{HookedLevels: []logrus.Level{logrus.WarnLevel}}
 	testLog := logrus.New()
 	testLog.AddHook(logHook)
 	testLog.SetOutput(ioutil.Discard)
 
-	state := &lib.State{
+	cases := []string{
+		"null",
+		"undefined",
+		"[]",
+		"{}",
+		`[1, 3, 5]`,
+		`{f1: "value1", f2: 4}`,
+		`{"foo": "bar"}`,
+	}
+	tenv := setupTagsExecEnv(t)
+	tenv.MoveToVUContext(&lib.State{
 		Options: lib.Options{
 			SystemTags: metrics.NewSystemTagSet(metrics.TagVU),
 		},
-		Tags: lib.NewTagMap(map[string]string{
-			"vu": "42",
-		}),
+		Tags:   lib.NewVUStateTags(metrics.NewRegistry().RootTagSet().With("vu", "42")),
 		Logger: testLog,
+	})
+	for _, val := range cases {
+		_, err := tenv.VU.Runtime().RunString(`exec.vu.tags["custom-tag"] = ` + val)
+		require.Error(t, err)
+
+		assert.Contains(t, err.Error(), "TypeError: invalid value for metric tag 'custom-tag'")
 	}
-
-	var (
-		rt  = goja.New()
-		ctx = context.Background()
-	)
-
-	m, ok := New().NewModuleInstance(
-		&modulestest.VU{
-			RuntimeField: rt,
-			InitEnvField: &common.InitEnvironment{},
-			CtxField:     ctx,
-			StateField:   state,
-		},
-	).(*ModuleInstance)
-	require.True(t, ok)
-	require.NoError(t, rt.Set("exec", m.Exports().Default))
-
-	return execEnv{
-		Module:  m,
-		Runtime: rt,
-		LogHook: logHook,
-	}
-}
-
-func TestVUTags(t *testing.T) {
-	t.Parallel()
-
-	t.Run("Get", func(t *testing.T) {
-		t.Parallel()
-
-		tenv := setupTagsExecEnv(t)
-		tag, err := tenv.Runtime.RunString(`exec.vu.tags["vu"]`)
-		require.NoError(t, err)
-		assert.Equal(t, "42", tag.String())
-
-		// not found
-		tag, err = tenv.Runtime.RunString(`exec.vu.tags["not-existing-tag"]`)
-		require.NoError(t, err)
-		assert.Equal(t, "undefined", tag.String())
-	})
-
-	t.Run("JSONEncoding", func(t *testing.T) {
-		t.Parallel()
-
-		tenv := setupTagsExecEnv(t)
-		state := tenv.Module.vu.State()
-		state.Tags.Set("custom-tag", "mytag1")
-
-		encoded, err := tenv.Runtime.RunString(`JSON.stringify(exec.vu.tags)`)
-		require.NoError(t, err)
-		assert.JSONEq(t, `{"vu":"42","custom-tag":"mytag1"}`, encoded.String())
-	})
-
-	t.Run("Set", func(t *testing.T) {
-		t.Parallel()
-
-		t.Run("SuccessAccetedTypes", func(t *testing.T) {
-			t.Parallel()
-
-			// bool and numbers are implicitly converted into string
-
-			tests := map[string]struct {
-				v   interface{}
-				exp string
-			}{
-				"string": {v: `"tag1"`, exp: "tag1"},
-				"bool":   {v: true, exp: "true"},
-				"int":    {v: 101, exp: "101"},
-				"float":  {v: 3.14, exp: "3.14"},
-			}
-
-			tenv := setupTagsExecEnv(t)
-
-			for _, tc := range tests {
-				_, err := tenv.Runtime.RunString(fmt.Sprintf(`exec.vu.tags["mytag"] = %v`, tc.v))
-				require.NoError(t, err)
-
-				val, err := tenv.Runtime.RunString(`exec.vu.tags["mytag"]`)
-				require.NoError(t, err)
-
-				assert.Equal(t, tc.exp, val.String())
-			}
-		})
-
-		t.Run("SuccessOverwriteSystemTag", func(t *testing.T) {
-			t.Parallel()
-
-			tenv := setupTagsExecEnv(t)
-
-			_, err := tenv.Runtime.RunString(`exec.vu.tags["vu"] = "vu101"`)
-			require.NoError(t, err)
-			val, err := tenv.Runtime.RunString(`exec.vu.tags["vu"]`)
-			require.NoError(t, err)
-			assert.Equal(t, "vu101", val.String())
-		})
-
-		t.Run("DiscardWrongTypeAndRaisingError", func(t *testing.T) {
-			t.Parallel()
-
-			tenv := setupTagsExecEnv(t)
-			state := tenv.Module.vu.State()
-			state.Options.Throw = null.BoolFrom(true)
-			require.NotNil(t, state)
-
-			cases := []string{
-				`[1, 3, 5]`,             // array
-				`{f1: "value1", f2: 4}`, // object
-			}
-
-			for _, val := range cases {
-				_, err := tenv.Runtime.RunString(`exec.vu.tags["custom-tag"] = ` + val)
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), "TypeError:")
-				assert.Contains(t, err.Error(), "only String, Boolean and Number")
-			}
-		})
-
-		t.Run("DiscardWrongTypeOnlyWarning", func(t *testing.T) {
-			t.Parallel()
-
-			tenv := setupTagsExecEnv(t)
-			_, err := tenv.Runtime.RunString(`exec.vu.tags["custom-tag"] = [1, 3, 5]`)
-			require.NoError(t, err)
-
-			entries := tenv.LogHook.Drain()
-			require.Len(t, entries, 1)
-			assert.Contains(t, entries[0].Message, "discarded")
-		})
-
-		t.Run("DiscardNullOrUndefined", func(t *testing.T) {
-			t.Parallel()
-
-			cases := []string{"null", "undefined"}
-			tenv := setupTagsExecEnv(t)
-			for _, val := range cases {
-				_, err := tenv.Runtime.RunString(`exec.vu.tags["custom-tag"] = ` + val)
-				require.NoError(t, err)
-
-				entries := tenv.LogHook.Drain()
-				require.Len(t, entries, 1)
-				assert.Contains(t, entries[0].Message, "discarded")
-			}
-		})
-	})
 }
 
 func TestAbortTest(t *testing.T) { //nolint:tparallel
@@ -350,7 +307,7 @@ func TestOptionsTestFull(t *testing.T) {
 					sysm := metrics.TagIter | metrics.TagVU
 					return &sysm
 				}(),
-				RunTags:                 metrics.NewSampleTags(map[string]string{"runtag-key": "runtag-value"}),
+				RunTags:                 map[string]string{"runtag-key": "runtag-value"},
 				MetricSamplesBufferSize: null.IntFrom(8),
 				ConsoleOutput:           null.StringFrom("loadtest.log"),
 				LocalIPs: func() types.NullIPPool {
@@ -379,7 +336,6 @@ func TestOptionsTestFull(t *testing.T) {
 	m, ok := New().NewModuleInstance(
 		&modulestest.VU{
 			RuntimeField: rt,
-			InitEnvField: &common.InitEnvironment{},
 			CtxField:     ctx,
 			StateField:   state,
 		},
@@ -400,7 +356,6 @@ func TestOptionsTestSetPropertyDenied(t *testing.T) {
 	m, ok := New().NewModuleInstance(
 		&modulestest.VU{
 			RuntimeField: rt,
-			InitEnvField: &common.InitEnvironment{},
 			CtxField:     context.Background(),
 			StateField: &lib.State{
 				Options: lib.Options{
@@ -426,7 +381,6 @@ func TestScenarioNoAvailableInInitContext(t *testing.T) {
 	m, ok := New().NewModuleInstance(
 		&modulestest.VU{
 			RuntimeField: rt,
-			InitEnvField: &common.InitEnvironment{},
 			CtxField:     context.Background(),
 			StateField: &lib.State{
 				Options: lib.Options{
@@ -446,4 +400,34 @@ func TestScenarioNoAvailableInInitContext(t *testing.T) {
 		require.Error(t, err)
 		require.ErrorContains(t, err, "getting scenario information outside of the VU context is not supported")
 	}
+}
+
+func TestTagsDynamicObjectGet(t *testing.T) {
+	t.Parallel()
+	rt := goja.New()
+	tdo := tagsDynamicObject{
+		runtime: rt,
+		state: &lib.State{
+			Tags: lib.NewVUStateTags(metrics.NewRegistry().RootTagSet().With("vu", "42")),
+		},
+	}
+	val := tdo.Get("vu")
+	require.NotNil(t, val)
+	assert.Equal(t, val.ToInteger(), int64(42))
+}
+
+func TestTagsDynamicObjectSet(t *testing.T) {
+	t.Parallel()
+	rt := goja.New()
+	tdo := tagsDynamicObject{
+		runtime: rt,
+		state: &lib.State{
+			Tags: lib.NewVUStateTags(metrics.NewRegistry().RootTagSet().With("vu", "42")),
+		},
+	}
+	require.True(t, tdo.Set("k1", rt.ToValue("v1")))
+
+	val := tdo.Get("k1")
+	require.NotNil(t, val)
+	assert.Equal(t, val.String(), "v1")
 }

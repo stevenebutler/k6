@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package netext
 
 import (
@@ -94,38 +74,46 @@ func (d *Dialer) DialContext(ctx context.Context, proto, addr string) (net.Conn,
 // TODO: Refactor this according to
 // https://github.com/k6io/k6/pull/1203#discussion_r337938370
 func (d *Dialer) GetTrail(
-	startTime, endTime time.Time, fullIteration bool, emitIterations bool, tags *metrics.SampleTags,
+	startTime, endTime time.Time, fullIteration bool, emitIterations bool, tags *metrics.TagSet,
 	builtinMetrics *metrics.BuiltinMetrics,
 ) *NetTrail {
 	bytesWritten := atomic.SwapInt64(&d.BytesWritten, 0)
 	bytesRead := atomic.SwapInt64(&d.BytesRead, 0)
 	samples := []metrics.Sample{
 		{
-			Time:   endTime,
-			Metric: builtinMetrics.DataSent,
-			Value:  float64(bytesWritten),
-			Tags:   tags,
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.DataSent,
+				Tags:   tags,
+			},
+			Time:  endTime,
+			Value: float64(bytesWritten),
 		},
 		{
-			Time:   endTime,
-			Metric: builtinMetrics.DataReceived,
-			Value:  float64(bytesRead),
-			Tags:   tags,
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.DataReceived,
+				Tags:   tags,
+			},
+			Time:  endTime,
+			Value: float64(bytesRead),
 		},
 	}
 	if fullIteration {
 		samples = append(samples, metrics.Sample{
-			Time:   endTime,
-			Metric: builtinMetrics.IterationDuration,
-			Value:  metrics.D(endTime.Sub(startTime)),
-			Tags:   tags,
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.IterationDuration,
+				Tags:   tags,
+			},
+			Time:  endTime,
+			Value: metrics.D(endTime.Sub(startTime)),
 		})
 		if emitIterations {
 			samples = append(samples, metrics.Sample{
-				Time:   endTime,
-				Metric: builtinMetrics.Iterations,
-				Value:  1,
-				Tags:   tags,
+				TimeSeries: metrics.TimeSeries{
+					Metric: builtinMetrics.Iterations,
+					Tags:   tags,
+				},
+				Time:  endTime,
+				Value: 1,
 			})
 		}
 	}
@@ -222,7 +210,7 @@ type NetTrail struct {
 	FullIteration bool
 	StartTime     time.Time
 	EndTime       time.Time
-	Tags          *metrics.SampleTags
+	Tags          *metrics.TagSet
 	Samples       []metrics.Sample
 }
 
@@ -235,7 +223,7 @@ func (ntr *NetTrail) GetSamples() []metrics.Sample {
 }
 
 // GetTags implements the metrics.ConnectedSampleContainer interface.
-func (ntr *NetTrail) GetTags() *metrics.SampleTags {
+func (ntr *NetTrail) GetTags() *metrics.TagSet {
 	return ntr.Tags
 }
 

@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package js
 
 import (
@@ -130,7 +110,7 @@ func TestInitContextRequire(t *testing.T) {
 			require.NoError(t, afero.WriteFile(fs, "/file.js", []byte(`throw new Error("aaaa")`), 0o755))
 			_, err := getSimpleBundle(t, "/script.js", `import "/file.js"; export default function() {}`, fs)
 			assert.EqualError(t, err,
-				"Error: aaaa\n\tat file:///file.js:2:7(3)\n\tat go.k6.io/k6/js.(*InitContext).Require-fm (native)\n\tat file:///script.js:1:0(15)\n\tat native\n")
+				"Error: aaaa\n\tat file:///file.js:2:7(3)\n\tat go.k6.io/k6/js.(*InitContext).Require-fm (native)\n\tat file:///script.js:1:0(14)\n\tat native\n")
 		})
 
 		imports := map[string]struct {
@@ -401,7 +381,7 @@ func TestRequestWithBinaryFile(t *testing.T) {
 		BPool:          bpool.NewBufferPool(1),
 		Samples:        make(chan metrics.SampleContainer, 500),
 		BuiltinMetrics: builtinMetrics,
-		Tags:           lib.NewTagMap(nil),
+		Tags:           lib.NewVUStateTags(registry.RootTagSet()),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -548,7 +528,7 @@ func TestRequestWithMultipleBinaryFiles(t *testing.T) {
 		BPool:          bpool.NewBufferPool(1),
 		Samples:        make(chan metrics.SampleContainer, 500),
 		BuiltinMetrics: builtinMetrics,
-		Tags:           lib.NewTagMap(nil),
+		Tags:           lib.NewVUStateTags(registry.RootTagSet()),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -609,7 +589,7 @@ export default function(){
 	require.Error(t, err)
 	exception := new(goja.Exception)
 	require.ErrorAs(t, err, &exception)
-	require.Equal(t, exception.String(), "exception in line 2\n\tat f2 (file:///module1.js:2:4(2))\n\tat file:///script.js:5:4(4)\n\tat native\n")
+	require.Equal(t, exception.String(), "exception in line 2\n\tat f2 (file:///module1.js:2:4(2))\n\tat file:///script.js:5:4(3)\n\tat native\n")
 }
 
 func TestSourceMapsExternal(t *testing.T) {

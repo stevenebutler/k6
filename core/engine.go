@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package core
 
 import (
@@ -72,10 +52,7 @@ type Engine struct {
 }
 
 // NewEngine instantiates a new Engine, without doing any heavy initialization.
-func NewEngine(
-	ex lib.ExecutionScheduler, opts lib.Options, rtOpts lib.RuntimeOptions, outputs []output.Output, logger *logrus.Logger,
-	registry *metrics.Registry,
-) (*Engine, error) {
+func NewEngine(testState *lib.TestRunState, ex lib.ExecutionScheduler, outputs []output.Output) (*Engine, error) {
 	if ex == nil {
 		return nil, errors.New("missing ExecutionScheduler instance")
 	}
@@ -83,26 +60,26 @@ func NewEngine(
 	e := &Engine{
 		ExecutionScheduler: ex,
 
-		runtimeOptions: rtOpts,
-		Samples:        make(chan metrics.SampleContainer, opts.MetricSamplesBufferSize.Int64),
+		runtimeOptions: testState.RuntimeOptions,
+		Samples:        make(chan metrics.SampleContainer, testState.Options.MetricSamplesBufferSize.Int64),
 		stopChan:       make(chan struct{}),
-		logger:         logger.WithField("component", "engine"),
+		logger:         testState.Logger.WithField("component", "engine"),
 	}
 
-	me, err := engine.NewMetricsEngine(registry, ex.GetState(), opts, rtOpts, logger)
+	me, err := engine.NewMetricsEngine(ex.GetState())
 	if err != nil {
 		return nil, err
 	}
 	e.MetricsEngine = me
 
-	if !(rtOpts.NoSummary.Bool && rtOpts.NoThresholds.Bool) {
+	if !(testState.RuntimeOptions.NoSummary.Bool && testState.RuntimeOptions.NoThresholds.Bool) {
 		e.ingester = me.GetIngester()
 		outputs = append(outputs, e.ingester)
 	}
 
-	e.OutputManager = output.NewManager(outputs, logger, func(err error) {
+	e.OutputManager = output.NewManager(outputs, testState.Logger, func(err error) {
 		if err != nil {
-			logger.WithError(err).Error("Received error to stop from output")
+			testState.Logger.WithError(err).Error("Received error to stop from output")
 		}
 		e.Stop()
 	})

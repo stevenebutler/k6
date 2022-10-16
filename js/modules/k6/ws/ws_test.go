@@ -1,27 +1,7 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2017 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
 package ws
 
 import (
 	"bytes"
-	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -32,16 +12,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dop251/goja"
 	"github.com/gorilla/websocket"
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/guregu/null.v3"
 
-	"go.k6.io/k6/js/common"
 	httpModule "go.k6.io/k6/js/modules/k6/http"
 	"go.k6.io/k6/js/modulestest"
 	"go.k6.io/k6/lib"
+	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/lib/testutils/httpmultibin"
 	"go.k6.io/k6/metrics"
 )
@@ -55,7 +35,7 @@ func assertSessionMetricsEmitted(t *testing.T, sampleContainers []metrics.Sample
 
 	for _, sampleContainer := range sampleContainers {
 		for _, sample := range sampleContainer.GetSamples() {
-			tags := sample.Tags.CloneTags()
+			tags := sample.Tags.Map()
 			if tags["url"] == url {
 				switch sample.Metric.Name {
 				case metrics.WSConnectingName:
@@ -94,24 +74,20 @@ func assertMetricEmittedCount(t *testing.T, metricName string, sampleContainers 
 }
 
 type testState struct {
-	ctxPtr  *context.Context
-	rt      *goja.Runtime
+	*modulestest.Runtime
 	tb      *httpmultibin.HTTPMultiBin
-	state   *lib.State
 	samples chan metrics.SampleContainer
 }
 
 func newTestState(t testing.TB) testState {
 	tb := httpmultibin.NewHTTPMultiBin(t)
 
-	root, err := lib.NewGroup("", nil)
-	require.NoError(t, err)
-
-	rt := goja.New()
-	rt.SetFieldNameMapper(common.FieldNameMapper{})
-
+	testRuntime := modulestest.NewRuntime(t)
 	samples := make(chan metrics.SampleContainer, 1000)
 
+	root, err := lib.NewGroup("", nil)
+	require.NoError(t, err)
+	registry := metrics.NewRegistry()
 	state := &lib.State{
 		Group:  root,
 		Dialer: tb.Dialer,
@@ -123,25 +99,21 @@ func newTestState(t testing.TB) testState {
 				metrics.TagSubproto,
 			),
 			UserAgent: null.StringFrom("TestUserAgent"),
+			Throw:     null.BoolFrom(true),
 		},
 		Samples:        samples,
 		TLSConfig:      tb.TLSClientConfig,
-		BuiltinMetrics: metrics.RegisterBuiltinMetrics(metrics.NewRegistry()),
-		Tags:           lib.NewTagMap(nil),
+		BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
+		Tags:           lib.NewVUStateTags(registry.RootTagSet()),
 	}
 
-	m := New().NewModuleInstance(&modulestest.VU{
-		CtxField:     tb.Context,
-		InitEnvField: &common.InitEnvironment{},
-		RuntimeField: rt,
-		StateField:   state,
-	})
-	require.NoError(t, rt.Set("ws", m.Exports().Default))
+	m := New().NewModuleInstance(testRuntime.VU)
+	require.NoError(t, testRuntime.VU.RuntimeField.Set("ws", m.Exports().Default))
+	testRuntime.MoveToVUContext(state)
 
 	return testState{
-		rt:      rt,
+		Runtime: testRuntime,
 		tb:      tb,
-		state:   state,
 		samples: samples,
 	}
 }
@@ -152,61 +124,32 @@ func TestSession(t *testing.T) {
 	tb := httpmultibin.NewHTTPMultiBin(t)
 	sr := tb.Replacer.Replace
 
-	root, err := lib.NewGroup("", nil)
-	require.NoError(t, err)
-
-	rt := goja.New()
-	rt.SetFieldNameMapper(common.FieldNameMapper{})
-	samples := make(chan metrics.SampleContainer, 1000)
-	state := &lib.State{
-		Group:  root,
-		Dialer: tb.Dialer,
-		Options: lib.Options{
-			SystemTags: metrics.NewSystemTagSet(
-				metrics.TagURL,
-				metrics.TagProto,
-				metrics.TagStatus,
-				metrics.TagSubproto,
-			),
-		},
-		Samples:        samples,
-		TLSConfig:      tb.TLSClientConfig,
-		BuiltinMetrics: metrics.RegisterBuiltinMetrics(metrics.NewRegistry()),
-		Tags:           lib.NewTagMap(nil),
-	}
-
-	m := New().NewModuleInstance(&modulestest.VU{
-		CtxField:     context.Background(),
-		InitEnvField: &common.InitEnvironment{},
-		RuntimeField: rt,
-		StateField:   state,
-	})
-	require.NoError(t, rt.Set("ws", m.Exports().Default))
+	test := newTestState(t)
 
 	t.Run("connect_ws", func(t *testing.T) {
-		_, err := rt.RunString(sr(`
+		_, err := test.VU.Runtime().RunString(sr(`
 		var res = ws.connect("WSBIN_URL/ws-echo", function(socket){
 			socket.close()
 		});
 		if (res.status != 101) { throw new Error("connection failed with status: " + res.status); }
 		`))
 		require.NoError(t, err)
+		assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(test.samples), "", sr("WSBIN_URL/ws-echo"), statusProtocolSwitch, "")
 	})
-	assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(samples), "", sr("WSBIN_URL/ws-echo"), statusProtocolSwitch, "")
 
 	t.Run("connect_wss", func(t *testing.T) {
-		_, err := rt.RunString(sr(`
+		_, err := test.VU.Runtime().RunString(sr(`
 		var res = ws.connect("WSSBIN_URL/ws-echo", function(socket){
 			socket.close()
 		});
 		if (res.status != 101) { throw new Error("TLS connection failed with status: " + res.status); }
 		`))
 		require.NoError(t, err)
+		assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(test.samples), "", sr("WSSBIN_URL/ws-echo"), statusProtocolSwitch, "")
 	})
-	assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(samples), "", sr("WSSBIN_URL/ws-echo"), statusProtocolSwitch, "")
 
 	t.Run("open", func(t *testing.T) {
-		_, err := rt.RunString(sr(`
+		_, err := test.VU.Runtime().RunString(sr(`
 		var opened = false;
 		var res = ws.connect("WSBIN_URL/ws-echo", function(socket){
 			socket.on("open", function() {
@@ -217,11 +160,11 @@ func TestSession(t *testing.T) {
 		if (!opened) { throw new Error ("open event not fired"); }
 		`))
 		require.NoError(t, err)
+		assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(test.samples), "", sr("WSBIN_URL/ws-echo"), statusProtocolSwitch, "")
 	})
-	assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(samples), "", sr("WSBIN_URL/ws-echo"), statusProtocolSwitch, "")
 
 	t.Run("send_receive", func(t *testing.T) {
-		_, err := rt.RunString(sr(`
+		_, err := test.VU.Runtime().RunString(sr(`
 		var res = ws.connect("WSBIN_URL/ws-echo", function(socket){
 			socket.on("open", function() {
 				socket.send("test")
@@ -235,15 +178,14 @@ func TestSession(t *testing.T) {
 		});
 		`))
 		require.NoError(t, err)
+		samplesBuf := metrics.GetBufferedSamples(test.samples)
+		assertSessionMetricsEmitted(t, samplesBuf, "", sr("WSBIN_URL/ws-echo"), statusProtocolSwitch, "")
+		assertMetricEmittedCount(t, metrics.WSMessagesSentName, samplesBuf, sr("WSBIN_URL/ws-echo"), 1)
+		assertMetricEmittedCount(t, metrics.WSMessagesReceivedName, samplesBuf, sr("WSBIN_URL/ws-echo"), 1)
 	})
 
-	samplesBuf := metrics.GetBufferedSamples(samples)
-	assertSessionMetricsEmitted(t, samplesBuf, "", sr("WSBIN_URL/ws-echo"), statusProtocolSwitch, "")
-	assertMetricEmittedCount(t, metrics.WSMessagesSentName, samplesBuf, sr("WSBIN_URL/ws-echo"), 1)
-	assertMetricEmittedCount(t, metrics.WSMessagesReceivedName, samplesBuf, sr("WSBIN_URL/ws-echo"), 1)
-
 	t.Run("interval", func(t *testing.T) {
-		_, err := rt.RunString(sr(`
+		_, err := test.VU.Runtime().RunString(sr(`
 		var counter = 0;
 		var res = ws.connect("WSBIN_URL/ws-echo", function(socket){
 			socket.setInterval(function () {
@@ -254,10 +196,10 @@ func TestSession(t *testing.T) {
 		if (counter < 3) {throw new Error ("setInterval should have been called at least 3 times, counter=" + counter);}
 		`))
 		require.NoError(t, err)
+		assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(test.samples), "", sr("WSBIN_URL/ws-echo"), statusProtocolSwitch, "")
 	})
-	assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(samples), "", sr("WSBIN_URL/ws-echo"), statusProtocolSwitch, "")
 	t.Run("bad interval", func(t *testing.T) {
-		_, err := rt.RunString(sr(`
+		_, err := test.VU.Runtime().RunString(sr(`
 		var counter = 0;
 		var res = ws.connect("WSBIN_URL/ws-echo", function(socket){
 			socket.setInterval(function () {
@@ -271,7 +213,7 @@ func TestSession(t *testing.T) {
 	})
 
 	t.Run("timeout", func(t *testing.T) {
-		_, err := rt.RunString(sr(`
+		_, err := test.VU.Runtime().RunString(sr(`
 		var start = new Date().getTime();
 		var ellapsed = new Date().getTime() - start;
 		var res = ws.connect("WSBIN_URL/ws-echo", function(socket){
@@ -288,7 +230,7 @@ func TestSession(t *testing.T) {
 	})
 
 	t.Run("bad timeout", func(t *testing.T) {
-		_, err := rt.RunString(sr(`
+		_, err := test.VU.Runtime().RunString(sr(`
 		var start = new Date().getTime();
 		var ellapsed = new Date().getTime() - start;
 		var res = ws.connect("WSBIN_URL/ws-echo", function(socket){
@@ -300,11 +242,11 @@ func TestSession(t *testing.T) {
 		`))
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "setTimeout requires a >0 timeout parameter, received 0.00 ")
+		assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(test.samples), "", sr("WSBIN_URL/ws-echo"), statusProtocolSwitch, "")
 	})
-	assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(samples), "", sr("WSBIN_URL/ws-echo"), statusProtocolSwitch, "")
 
 	t.Run("ping", func(t *testing.T) {
-		_, err := rt.RunString(sr(`
+		_, err := test.VU.Runtime().RunString(sr(`
 		var pongReceived = false;
 		var res = ws.connect("WSBIN_URL/ws-echo", function(socket){
 			socket.on("open", function(data) {
@@ -321,14 +263,13 @@ func TestSession(t *testing.T) {
 		}
 		`))
 		require.NoError(t, err)
+		samplesBuf := metrics.GetBufferedSamples(test.samples)
+		assertSessionMetricsEmitted(t, samplesBuf, "", sr("WSBIN_URL/ws-echo"), statusProtocolSwitch, "")
+		assertMetricEmittedCount(t, metrics.WSPingName, samplesBuf, sr("WSBIN_URL/ws-echo"), 1)
 	})
 
-	samplesBuf = metrics.GetBufferedSamples(samples)
-	assertSessionMetricsEmitted(t, samplesBuf, "", sr("WSBIN_URL/ws-echo"), statusProtocolSwitch, "")
-	assertMetricEmittedCount(t, metrics.WSPingName, samplesBuf, sr("WSBIN_URL/ws-echo"), 1)
-
 	t.Run("multiple_handlers", func(t *testing.T) {
-		_, err := rt.RunString(sr(`
+		_, err := test.VU.Runtime().RunString(sr(`
 		var pongReceived = false;
 		var otherPongReceived = false;
 
@@ -355,14 +296,13 @@ func TestSession(t *testing.T) {
 		}
 		`))
 		require.NoError(t, err)
+		samplesBuf := metrics.GetBufferedSamples(test.samples)
+		assertSessionMetricsEmitted(t, samplesBuf, "", sr("WSBIN_URL/ws-echo"), statusProtocolSwitch, "")
+		assertMetricEmittedCount(t, metrics.WSPingName, samplesBuf, sr("WSBIN_URL/ws-echo"), 1)
 	})
 
-	samplesBuf = metrics.GetBufferedSamples(samples)
-	assertSessionMetricsEmitted(t, samplesBuf, "", sr("WSBIN_URL/ws-echo"), statusProtocolSwitch, "")
-	assertMetricEmittedCount(t, metrics.WSPingName, samplesBuf, sr("WSBIN_URL/ws-echo"), 1)
-
 	t.Run("client_close", func(t *testing.T) {
-		_, err := rt.RunString(sr(`
+		_, err := test.VU.Runtime().RunString(sr(`
 		var closed = false;
 		var res = ws.connect("WSBIN_URL/ws-echo", function(socket){
 			socket.on("open", function() {
@@ -375,8 +315,8 @@ func TestSession(t *testing.T) {
 		if (!closed) { throw new Error ("close event not fired"); }
 		`))
 		require.NoError(t, err)
+		assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(test.samples), "", sr("WSBIN_URL/ws-echo"), statusProtocolSwitch, "")
 	})
-	assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(samples), "", sr("WSBIN_URL/ws-echo"), statusProtocolSwitch, "")
 
 	serverCloseTests := []struct {
 		name     string
@@ -392,7 +332,7 @@ func TestSession(t *testing.T) {
 	for _, tc := range serverCloseTests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := rt.RunString(sr(fmt.Sprintf(`
+			_, err := test.VU.Runtime().RunString(sr(fmt.Sprintf(`
 			var closed = false;
 			var res = ws.connect("WSBIN_URL%s", function(socket){
 				socket.on("open", function() {
@@ -437,7 +377,7 @@ func TestSession(t *testing.T) {
 		}))
 
 		t.Run("send_receive_multiple_ws", func(t *testing.T) {
-			_, err := rt.RunString(sr(`
+			_, err := test.VU.Runtime().RunString(sr(`
 			var msg1 = "test1"
 			var msg2 = "test2"
 			var msg3 = "test3"
@@ -465,15 +405,14 @@ func TestSession(t *testing.T) {
 			}
 			`))
 			require.NoError(t, err)
+			samplesBuf := metrics.GetBufferedSamples(test.samples)
+			assertSessionMetricsEmitted(t, samplesBuf, "", sr("WSBIN_URL/ws-echo-multi"), statusProtocolSwitch, "")
+			assertMetricEmittedCount(t, metrics.WSMessagesSentName, samplesBuf, sr("WSBIN_URL/ws-echo-multi"), 3)
+			assertMetricEmittedCount(t, metrics.WSMessagesReceivedName, samplesBuf, sr("WSBIN_URL/ws-echo-multi"), 3)
 		})
 
-		samplesBuf = metrics.GetBufferedSamples(samples)
-		assertSessionMetricsEmitted(t, samplesBuf, "", sr("WSBIN_URL/ws-echo-multi"), statusProtocolSwitch, "")
-		assertMetricEmittedCount(t, metrics.WSMessagesSentName, samplesBuf, sr("WSBIN_URL/ws-echo-multi"), 3)
-		assertMetricEmittedCount(t, metrics.WSMessagesReceivedName, samplesBuf, sr("WSBIN_URL/ws-echo-multi"), 3)
-
 		t.Run("send_receive_multiple_wss", func(t *testing.T) {
-			_, err := rt.RunString(sr(`
+			_, err := test.VU.Runtime().RunString(sr(`
 			var msg1 = "test1"
 			var msg2 = "test2"
 			var secondMsgReceived = false
@@ -497,15 +436,14 @@ func TestSession(t *testing.T) {
 			}
 			`))
 			require.NoError(t, err)
+			samplesBuf := metrics.GetBufferedSamples(test.samples)
+			assertSessionMetricsEmitted(t, samplesBuf, "", sr("WSSBIN_URL/ws-echo-multi"), statusProtocolSwitch, "")
+			assertMetricEmittedCount(t, metrics.WSMessagesSentName, samplesBuf, sr("WSSBIN_URL/ws-echo-multi"), 2)
+			assertMetricEmittedCount(t, metrics.WSMessagesReceivedName, samplesBuf, sr("WSSBIN_URL/ws-echo-multi"), 2)
 		})
 
-		samplesBuf = metrics.GetBufferedSamples(samples)
-		assertSessionMetricsEmitted(t, samplesBuf, "", sr("WSSBIN_URL/ws-echo-multi"), statusProtocolSwitch, "")
-		assertMetricEmittedCount(t, metrics.WSMessagesSentName, samplesBuf, sr("WSSBIN_URL/ws-echo-multi"), 2)
-		assertMetricEmittedCount(t, metrics.WSMessagesReceivedName, samplesBuf, sr("WSSBIN_URL/ws-echo-multi"), 2)
-
 		t.Run("send_receive_text_binary", func(t *testing.T) {
-			_, err := rt.RunString(sr(`
+			_, err := test.VU.Runtime().RunString(sr(`
 			var msg1 = "test1"
 			var msg2 = new Uint8Array([116, 101, 115, 116, 50]); // 'test2'
 			var secondMsgReceived = false
@@ -532,12 +470,11 @@ func TestSession(t *testing.T) {
 			}
 			`))
 			require.NoError(t, err)
+			samplesBuf := metrics.GetBufferedSamples(test.samples)
+			assertSessionMetricsEmitted(t, samplesBuf, "", sr("WSBIN_URL/ws-echo-multi"), statusProtocolSwitch, "")
+			assertMetricEmittedCount(t, metrics.WSMessagesSentName, samplesBuf, sr("WSBIN_URL/ws-echo-multi"), 2)
+			assertMetricEmittedCount(t, metrics.WSMessagesReceivedName, samplesBuf, sr("WSBIN_URL/ws-echo-multi"), 2)
 		})
-
-		samplesBuf = metrics.GetBufferedSamples(samples)
-		assertSessionMetricsEmitted(t, samplesBuf, "", sr("WSBIN_URL/ws-echo-multi"), statusProtocolSwitch, "")
-		assertMetricEmittedCount(t, metrics.WSMessagesSentName, samplesBuf, sr("WSBIN_URL/ws-echo-multi"), 2)
-		assertMetricEmittedCount(t, metrics.WSMessagesReceivedName, samplesBuf, sr("WSBIN_URL/ws-echo-multi"), 2)
 	})
 }
 
@@ -546,39 +483,10 @@ func TestSocketSendBinary(t *testing.T) { //nolint:tparallel
 	tb := httpmultibin.NewHTTPMultiBin(t)
 	sr := tb.Replacer.Replace
 
-	root, err := lib.NewGroup("", nil)
-	require.NoError(t, err)
-
-	rt := goja.New()
-	rt.SetFieldNameMapper(common.FieldNameMapper{})
-	samples := make(chan metrics.SampleContainer, 1000)
-	state := &lib.State{ //nolint:exhaustivestruct
-		Group:  root,
-		Dialer: tb.Dialer,
-		Options: lib.Options{ //nolint:exhaustivestruct
-			SystemTags: metrics.NewSystemTagSet(
-				metrics.TagURL,
-				metrics.TagProto,
-				metrics.TagStatus,
-				metrics.TagSubproto,
-			),
-		},
-		Samples:        samples,
-		TLSConfig:      tb.TLSClientConfig,
-		BuiltinMetrics: metrics.RegisterBuiltinMetrics(metrics.NewRegistry()),
-		Tags:           lib.NewTagMap(nil),
-	}
-
-	m := New().NewModuleInstance(&modulestest.VU{
-		CtxField:     context.Background(),
-		InitEnvField: &common.InitEnvironment{},
-		RuntimeField: rt,
-		StateField:   state,
-	})
-	require.NoError(t, rt.Set("ws", m.Exports().Default))
+	test := newTestState(t)
 
 	t.Run("ok", func(t *testing.T) {
-		_, err = rt.RunString(sr(`
+		_, err := test.VU.Runtime().RunString(sr(`
 		var gotMsg = false;
 		var res = ws.connect('WSBIN_URL/ws-echo', function(socket){
 			var data = new Uint8Array([104, 101, 108, 108, 111]); // 'hello'
@@ -622,7 +530,7 @@ func TestSocketSendBinary(t *testing.T) { //nolint:tparallel
 	for _, tc := range errTestCases { //nolint:paralleltest
 		tc := tc
 		t.Run(fmt.Sprintf("err_%s", tc.expErrType), func(t *testing.T) {
-			_, err = rt.RunString(fmt.Sprintf(sr(`
+			_, err := test.VU.Runtime().RunString(fmt.Sprintf(sr(`
 			var res = ws.connect('WSBIN_URL/ws-echo', function(socket){
 				socket.on('open', function() {
 					socket.sendBinary(%s);
@@ -644,33 +552,10 @@ func TestErrors(t *testing.T) {
 	tb := httpmultibin.NewHTTPMultiBin(t)
 	sr := tb.Replacer.Replace
 
-	root, err := lib.NewGroup("", nil)
-	require.NoError(t, err)
-
-	rt := goja.New()
-	rt.SetFieldNameMapper(common.FieldNameMapper{})
-	samples := make(chan metrics.SampleContainer, 1000)
-	state := &lib.State{
-		Group:  root,
-		Dialer: tb.Dialer,
-		Options: lib.Options{
-			SystemTags: &metrics.DefaultSystemTagSet,
-		},
-		Samples:        samples,
-		BuiltinMetrics: metrics.RegisterBuiltinMetrics(metrics.NewRegistry()),
-		Tags:           lib.NewTagMap(nil),
-	}
-
-	m := New().NewModuleInstance(&modulestest.VU{
-		CtxField:     context.Background(),
-		InitEnvField: &common.InitEnvironment{},
-		RuntimeField: rt,
-		StateField:   state,
-	})
-	require.NoError(t, rt.Set("ws", m.Exports().Default))
+	test := newTestState(t)
 
 	t.Run("invalid_url", func(t *testing.T) {
-		_, err := rt.RunString(`
+		_, err := test.VU.Runtime().RunString(`
 		var res = ws.connect("INVALID", function(socket){
 			socket.on("open", function() {
 				socket.close();
@@ -682,7 +567,7 @@ func TestErrors(t *testing.T) {
 
 	t.Run("invalid_url_message_panic", func(t *testing.T) {
 		// Attempting to send a message to a non-existent socket shouldn't panic
-		_, err := rt.RunString(`
+		_, err := test.VU.Runtime().RunString(`
 		var res = ws.connect("INVALID", function(socket){
 			socket.send("new message");
 		});
@@ -691,7 +576,7 @@ func TestErrors(t *testing.T) {
 	})
 
 	t.Run("error_in_setup", func(t *testing.T) {
-		_, err := rt.RunString(sr(`
+		_, err := test.VU.Runtime().RunString(sr(`
 		var res = ws.connect("WSBIN_URL/ws-echo-invalid", function(socket){
 			throw new Error("error in setup");
 		});
@@ -700,7 +585,7 @@ func TestErrors(t *testing.T) {
 	})
 
 	t.Run("send_after_close", func(t *testing.T) {
-		_, err := rt.RunString(sr(`
+		_, err := test.VU.Runtime().RunString(sr(`
 		var hasError = false;
 		var res = ws.connect("WSBIN_URL/ws-echo-invalid", function(socket){
 			socket.on("open", function() {
@@ -717,11 +602,11 @@ func TestErrors(t *testing.T) {
 		}
 		`))
 		require.NoError(t, err)
-		assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(samples), "", sr("WSBIN_URL/ws-echo-invalid"), statusProtocolSwitch, "")
+		assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(test.samples), "", sr("WSBIN_URL/ws-echo-invalid"), statusProtocolSwitch, "")
 	})
 
 	t.Run("error on close", func(t *testing.T) {
-		_, err := rt.RunString(sr(`
+		_, err := test.VU.Runtime().RunString(sr(`
 		var closed = false;
 		var res = ws.connect("WSBIN_URL/ws-close", function(socket){
 			socket.on('open', function open() {
@@ -746,49 +631,21 @@ func TestErrors(t *testing.T) {
 		});
 		`))
 		require.NoError(t, err)
-		assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(samples), "", sr("WSBIN_URL/ws-close"), statusProtocolSwitch, "")
+		assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(test.samples), "", sr("WSBIN_URL/ws-close"), statusProtocolSwitch, "")
 	})
 }
 
 func TestSystemTags(t *testing.T) {
-	tb := httpmultibin.NewHTTPMultiBin(t)
-
-	sr := tb.Replacer.Replace
-
-	root, err := lib.NewGroup("", nil)
-	require.NoError(t, err)
-
-	rt := goja.New()
-	rt.SetFieldNameMapper(common.FieldNameMapper{})
-
-	// TODO: test for actual tag values after removing the dependency on the
-	// external service demos.kaazing.com (https://github.com/k6io/k6/issues/537)
-	testedSystemTags := []string{"group", "status", "subproto", "url", "ip"}
-
-	samples := make(chan metrics.SampleContainer, 1000)
-	state := &lib.State{
-		Group:          root,
-		Dialer:         tb.Dialer,
-		Options:        lib.Options{SystemTags: metrics.ToSystemTagSet(testedSystemTags)},
-		Samples:        samples,
-		TLSConfig:      tb.TLSClientConfig,
-		BuiltinMetrics: metrics.RegisterBuiltinMetrics(metrics.NewRegistry()),
-		Tags:           lib.NewTagMap(nil),
-	}
-
-	m := New().NewModuleInstance(&modulestest.VU{
-		CtxField:     context.Background(),
-		InitEnvField: &common.InitEnvironment{},
-		RuntimeField: rt,
-		StateField:   state,
-	})
-	require.NoError(t, rt.Set("ws", m.Exports().Default))
-
-	for _, expectedTag := range testedSystemTags {
-		expectedTag := expectedTag
-		t.Run("only "+expectedTag, func(t *testing.T) {
-			state.Options.SystemTags = metrics.ToSystemTagSet([]string{expectedTag})
-			_, err := rt.RunString(sr(`
+	t.Parallel()
+	testedSystemTags := []string{"status", "subproto", "url", "ip"}
+	for _, expectedTagStr := range testedSystemTags {
+		expectedTagStr := expectedTagStr
+		t.Run("only "+expectedTagStr, func(t *testing.T) {
+			t.Parallel()
+			test := newTestState(t)
+			tb := httpmultibin.NewHTTPMultiBin(t)
+			test.VU.StateField.Options.SystemTags = metrics.ToSystemTagSet([]string{expectedTagStr})
+			_, err := test.VU.Runtime().RunString(tb.Replacer.Replace(`
 			var res = ws.connect("WSBIN_URL/ws-echo", function(socket){
 				socket.on("open", function() {
 					socket.send("test")
@@ -802,11 +659,16 @@ func TestSystemTags(t *testing.T) {
 			});
 			`))
 			require.NoError(t, err)
-
-			for _, sampleContainer := range metrics.GetBufferedSamples(samples) {
+			containers := metrics.GetBufferedSamples(test.samples)
+			require.NotEmpty(t, containers)
+			for _, sampleContainer := range containers {
+				require.NotEmpty(t, sampleContainer.GetSamples())
 				for _, sample := range sampleContainer.GetSamples() {
-					for emittedTag := range sample.Tags.CloneTags() {
-						assert.Equal(t, expectedTag, emittedTag)
+					dataToCheck := sample.Tags.Map()
+
+					require.NotEmpty(t, dataToCheck)
+					for emittedTag := range dataToCheck {
+						assert.Equal(t, expectedTagStr, emittedTag)
 					}
 				}
 			}
@@ -815,60 +677,30 @@ func TestSystemTags(t *testing.T) {
 }
 
 func TestTLSConfig(t *testing.T) {
-	root, err := lib.NewGroup("", nil)
-	require.NoError(t, err)
-
 	tb := httpmultibin.NewHTTPMultiBin(t)
 
 	sr := tb.Replacer.Replace
 
-	rt := goja.New()
-	rt.SetFieldNameMapper(common.FieldNameMapper{})
-	samples := make(chan metrics.SampleContainer, 1000)
-	state := &lib.State{
-		Group:  root,
-		Dialer: tb.Dialer,
-		Options: lib.Options{
-			SystemTags: metrics.NewSystemTagSet(
-				metrics.TagURL,
-				metrics.TagProto,
-				metrics.TagStatus,
-				metrics.TagSubproto,
-				metrics.TagIP,
-			),
-		},
-		Samples:        samples,
-		BuiltinMetrics: metrics.RegisterBuiltinMetrics(metrics.NewRegistry()),
-		Tags:           lib.NewTagMap(nil),
-	}
-
-	m := New().NewModuleInstance(&modulestest.VU{
-		CtxField:     context.Background(),
-		InitEnvField: &common.InitEnvironment{},
-		RuntimeField: rt,
-		StateField:   state,
-	})
-	require.NoError(t, rt.Set("ws", m.Exports().Default))
-
+	test := newTestState(t)
 	t.Run("insecure skip verify", func(t *testing.T) {
-		state.TLSConfig = &tls.Config{
+		test.VU.StateField.TLSConfig = &tls.Config{
 			InsecureSkipVerify: true,
 		}
 
-		_, err := rt.RunString(sr(`
+		_, err := test.VU.Runtime().RunString(sr(`
 		var res = ws.connect("WSSBIN_URL/ws-close", function(socket){
 			socket.close()
 		});
 		if (res.status != 101) { throw new Error("TLS connection failed with status: " + res.status); }
 		`))
 		require.NoError(t, err)
+		assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(test.samples), "", sr("WSSBIN_URL/ws-close"), statusProtocolSwitch, "")
 	})
-	assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(samples), "", sr("WSSBIN_URL/ws-close"), statusProtocolSwitch, "")
 
 	t.Run("custom certificates", func(t *testing.T) {
-		state.TLSConfig = tb.TLSClientConfig
+		test.VU.StateField.TLSConfig = tb.TLSClientConfig
 
-		_, err := rt.RunString(sr(`
+		_, err := test.VU.Runtime().RunString(sr(`
 			var res = ws.connect("WSSBIN_URL/ws-close", function(socket){
 				socket.close()
 			});
@@ -877,8 +709,8 @@ func TestTLSConfig(t *testing.T) {
 			}
 		`))
 		require.NoError(t, err)
+		assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(test.samples), "", sr("WSSBIN_URL/ws-close"), statusProtocolSwitch, "")
 	})
-	assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(samples), "", sr("WSSBIN_URL/ws-close"), statusProtocolSwitch, "")
 }
 
 func TestReadPump(t *testing.T) {
@@ -960,40 +792,10 @@ func TestUserAgent(t *testing.T) {
 		}
 	}))
 
-	root, err := lib.NewGroup("", nil)
-	require.NoError(t, err)
-
-	rt := goja.New()
-	rt.SetFieldNameMapper(common.FieldNameMapper{})
-	samples := make(chan metrics.SampleContainer, 1000)
-	state := &lib.State{
-		Group:  root,
-		Dialer: tb.Dialer,
-		Options: lib.Options{
-			SystemTags: metrics.NewSystemTagSet(
-				metrics.TagURL,
-				metrics.TagProto,
-				metrics.TagStatus,
-				metrics.TagSubproto,
-			),
-			UserAgent: null.StringFrom("TestUserAgent"),
-		},
-		Samples:        samples,
-		TLSConfig:      tb.TLSClientConfig,
-		BuiltinMetrics: metrics.RegisterBuiltinMetrics(metrics.NewRegistry()),
-		Tags:           lib.NewTagMap(nil),
-	}
-
-	m := New().NewModuleInstance(&modulestest.VU{
-		CtxField:     context.Background(),
-		InitEnvField: &common.InitEnvironment{},
-		RuntimeField: rt,
-		StateField:   state,
-	})
-	require.NoError(t, rt.Set("ws", m.Exports().Default))
+	test := newTestState(t)
 
 	// websocket handler should echo back User-Agent as Echo-User-Agent for this test to work
-	_, err = rt.RunString(sr(`
+	_, err := test.VU.Runtime().RunString(sr(`
 		var res = ws.connect("WSBIN_URL/ws-echo-useragent", function(socket){
 			socket.close()
 		})
@@ -1007,7 +809,7 @@ func TestUserAgent(t *testing.T) {
 		`))
 	require.NoError(t, err)
 
-	assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(samples), "", sr("WSBIN_URL/ws-echo-useragent"), statusProtocolSwitch, "")
+	assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(test.samples), "", sr("WSBIN_URL/ws-echo-useragent"), statusProtocolSwitch, "")
 }
 
 func TestCompression(t *testing.T) {
@@ -1045,7 +847,7 @@ func TestCompression(t *testing.T) {
 			}
 		}))
 
-		_, err := ts.rt.RunString(sr(`
+		_, err := ts.VU.Runtime().RunString(sr(`
 		// if client supports compression, it has to send the header
 		// 'Sec-Websocket-Extensions:permessage-deflate; server_no_context_takeover; client_no_context_takeover' to server.
 		// if compression is negotiated successfully, server will reply with header
@@ -1127,7 +929,7 @@ func TestCompression(t *testing.T) {
 					}
 				}))
 
-				_, err := ts.rt.RunString(sr(`
+				_, err := ts.VU.Runtime().RunString(sr(`
 					var res = ws.connect("WSBIN_URL/ws-compression-param", {"compression":"` + testCase.compression + `"}, function(socket){
 						socket.close()
 					});
@@ -1210,14 +1012,14 @@ func BenchmarkCompression(b *testing.B) {
 	b.ResetTimer()
 	b.Run("compression-enabled", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			if _, err := ts.rt.RunString(testCodes[0]); err != nil {
+			if _, err := ts.VU.Runtime().RunString(testCodes[0]); err != nil {
 				b.Error(err)
 			}
 		}
 	})
 	b.Run("compression-disabled", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			if _, err := ts.rt.RunString(testCodes[1]); err != nil {
+			if _, err := ts.VU.Runtime().RunString(testCodes[1]); err != nil {
 				b.Error(err)
 			}
 		}
@@ -1246,17 +1048,11 @@ func TestCookieJar(t *testing.T) {
 		}
 	}))
 
-	mii := &modulestest.VU{
-		RuntimeField: ts.rt,
-		InitEnvField: &common.InitEnvironment{Registry: metrics.NewRegistry()},
-		CtxField:     context.Background(),
-		StateField:   ts.state,
-	}
-	err := ts.rt.Set("http", httpModule.New().NewModuleInstance(mii).Exports().Default)
+	err := ts.VU.Runtime().Set("http", httpModule.New().NewModuleInstance(ts.VU).Exports().Default)
 	require.NoError(t, err)
-	ts.state.CookieJar, _ = cookiejar.New(nil)
+	ts.VU.State().CookieJar, _ = cookiejar.New(nil)
 
-	_, err = ts.rt.RunString(sr(`
+	_, err = ts.VU.Runtime().RunString(sr(`
 		var res = ws.connect("WSBIN_URL/ws-echo-someheader", function(socket){
 			socket.close()
 		})
@@ -1287,4 +1083,50 @@ func TestCookieJar(t *testing.T) {
 	require.NoError(t, err)
 
 	assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(ts.samples), "", sr("WSBIN_URL/ws-echo-someheader"), statusProtocolSwitch, "")
+}
+
+func TestWSConnectEnableThrowErrorOption(t *testing.T) {
+	t.Parallel()
+	logHook := &testutils.SimpleLogrusHook{HookedLevels: []logrus.Level{logrus.WarnLevel}}
+	testLog := logrus.New()
+	testLog.AddHook(logHook)
+	testLog.SetOutput(io.Discard)
+	ts := newTestState(t)
+	ts.VU.StateField.Logger = testLog
+	_, err := ts.VU.Runtime().RunString(`
+		var res = ws.connect("INVALID", function(socket){
+			socket.on("open", function() {
+				socket.close();
+			});
+		});
+		`)
+	entries := logHook.Drain()
+	require.Len(t, entries, 0)
+	assert.Error(t, err)
+}
+
+func TestWSConnectDisableThrowErrorOption(t *testing.T) {
+	t.Parallel()
+	logHook := &testutils.SimpleLogrusHook{HookedLevels: []logrus.Level{logrus.WarnLevel}}
+	testLog := logrus.New()
+	testLog.AddHook(logHook)
+	testLog.SetOutput(io.Discard)
+
+	ts := newTestState(t)
+	ts.VU.StateField.Logger = testLog
+	ts.VU.StateField.Options.Throw = null.BoolFrom(false)
+	_, err := ts.VU.Runtime().RunString(`
+		var res = ws.connect("INVALID", function(socket){
+			socket.on("open", function() {
+				socket.close();
+			});
+		});
+		if (res == null && res.error == null) {
+			throw new Error("res.error is expected to be not null");
+		}
+		`)
+	assert.NoError(t, err)
+	entries := logHook.Drain()
+	require.Len(t, entries, 1)
+	assert.Contains(t, entries[0].Message, "Attempt to establish a WebSocket connection failed")
 }

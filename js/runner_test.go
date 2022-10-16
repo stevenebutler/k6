@@ -1,36 +1,22 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package js
 
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"go/build"
 	"io/ioutil"
 	stdlog "log"
+	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
@@ -43,6 +29,7 @@ import (
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/time/rate"
 	"google.golang.org/grpc/test/grpc_testing"
 	"gopkg.in/guregu/null.v3"
 
@@ -60,7 +47,6 @@ import (
 	"go.k6.io/k6/lib/testutils/httpmultibin"
 	"go.k6.io/k6/lib/testutils/mockoutput"
 	"go.k6.io/k6/lib/types"
-	"go.k6.io/k6/loader"
 	"go.k6.io/k6/metrics"
 	"go.k6.io/k6/output"
 )
@@ -110,7 +96,7 @@ func TestRunnerGetDefaultGroup(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r2, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -127,7 +113,7 @@ func TestRunnerOptions(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r2, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -147,6 +133,53 @@ func TestRunnerOptions(t *testing.T) {
 			r.SetOptions(lib.Options{Paused: null.BoolFrom(false)})
 			assert.Equal(t, r.Bundle.Options, r.GetOptions())
 			assert.Equal(t, null.NewBool(false, true), r.Bundle.Options.Paused)
+		})
+	}
+}
+
+func TestRunnerRPSLimit(t *testing.T) {
+	t.Parallel()
+
+	var nilLimiter *rate.Limiter
+
+	variants := []struct {
+		name    string
+		options lib.Options
+		limiter *rate.Limiter
+	}{
+		{
+			name:    "RPS not defined",
+			options: lib.Options{},
+			limiter: nilLimiter,
+		},
+		{
+			name:    "RPS set to non-zero int",
+			options: lib.Options{RPS: null.IntFrom(9)},
+			limiter: rate.NewLimiter(rate.Limit(9), 1),
+		},
+		{
+			name:    "RPS set to zero",
+			options: lib.Options{RPS: null.IntFrom(0)},
+			limiter: nilLimiter,
+		},
+		{
+			name:    "RPS set to below zero value",
+			options: lib.Options{RPS: null.IntFrom(-1)},
+			limiter: nilLimiter,
+		},
+	}
+
+	for _, variant := range variants {
+		variant := variant
+
+		t.Run(variant.name, func(t *testing.T) {
+			t.Parallel()
+
+			r, err := getSimpleRunner(t, "/script.js", `exports.default = function() {};`)
+			require.NoError(t, err)
+			err = r.SetOptions(variant.options)
+			require.NoError(t, err)
+			assert.Equal(t, variant.limiter, r.RPSLimit)
 		})
 	}
 }
@@ -176,7 +209,9 @@ func TestOptionsSettingToScript(t *testing.T) {
 				lib.RuntimeOptions{Env: map[string]string{"expectedTeardownTimeout": "4s"}})
 			require.NoError(t, err)
 
-			newOptions := lib.Options{TeardownTimeout: types.NullDurationFrom(4 * time.Second)}
+			newOptions := lib.Options{
+				TeardownTimeout: types.NullDurationFrom(4 * time.Second),
+			}
 			r.SetOptions(newOptions)
 			require.Equal(t, newOptions, r.GetOptions())
 
@@ -208,7 +243,9 @@ func TestOptionsPropagationToScript(t *testing.T) {
 				}
 			};`
 
-	expScriptOptions := lib.Options{SetupTimeout: types.NullDurationFrom(1 * time.Second)}
+	expScriptOptions := lib.Options{
+		SetupTimeout: types.NullDurationFrom(1 * time.Second),
+	}
 	r1, err := getSimpleRunner(t, "/script.js", data,
 		lib.RuntimeOptions{Env: map[string]string{"expectedSetupTimeout": "1s"}})
 	require.NoError(t, err)
@@ -217,19 +254,15 @@ func TestOptionsPropagationToScript(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r2, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
 			RuntimeOptions: lib.RuntimeOptions{Env: map[string]string{"expectedSetupTimeout": "3s"}},
 		}, r1.MakeArchive())
-
 	require.NoError(t, err)
 	require.Equal(t, expScriptOptions, r2.GetOptions())
-
-	newOptions := lib.Options{SetupTimeout: types.NullDurationFrom(3 * time.Second)}
-	require.NoError(t, r2.SetOptions(newOptions))
-	require.Equal(t, newOptions, r2.GetOptions())
+	r2.Bundle.Options.SetupTimeout = types.NullDurationFrom(3 * time.Second)
 
 	testdata := map[string]*Runner{"Source": r1, "Archive": r2}
 	for name, r := range testdata {
@@ -265,18 +298,30 @@ func TestMetricName(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestSetupDataIsolation(t *testing.T) {
+func TestDataIsolation(t *testing.T) {
 	t.Parallel()
 
 	script := `
+		var exec = require("k6/execution");
 		var Counter = require("k6/metrics").Counter;
+		var sleep = require('k6').sleep;
 
 		exports.options = {
 			scenarios: {
-				shared_iters: {
+				sc1: {
 					executor: "shared-iterations",
-					vus: 5,
-					iterations: 500,
+					vus: 2,
+					iterations: 100,
+					maxDuration: "9s",
+					gracefulStop: 0,
+					exec: "sc1",
+				},
+				sc2: {
+					executor: "per-vu-iterations",
+					vus: 1,
+					iterations: 1,
+					startTime: "11s",
+					exec: "sc2",
 				},
 			},
 			teardownTimeout: "5s",
@@ -288,11 +333,31 @@ func TestSetupDataIsolation(t *testing.T) {
 			return { v: 0 };
 		}
 
-		exports.default = function(data) {
+		exports.sc1 = function(data) {
 			if (data.v !== __ITER) {
-				throw new Error("default: wrong data for iter " + __ITER + ": " + JSON.stringify(data));
+				throw new Error("sc1: wrong data for iter " + __ITER + ": " + JSON.stringify(data));
+			}
+			if (__ITER != 0 && data.v != exec.vu.tags.myiter) {
+				throw new Error("sc1: wrong vu tags for iter " + __ITER + ": " + JSON.stringify(exec.vu.tags));
 			}
 			data.v += 1;
+			exec.vu.tags.myiter = data.v;
+			myCounter.add(1);
+			sleep(0.01);
+		}
+
+		exports.sc2 = function(data) {
+			if (data.v === 0) {
+				throw new Error("sc2: wrong data, expected VU to have modified setup data locally: " + data.v);
+			}
+
+			if (typeof exec.vu.tags.myiter !== "undefined") {
+				throw new Error(
+					"sc2: wrong tags, expected VU to have new tags in new scenario: " +
+					JSON.stringify(exec.vu.tags),
+				);
+			}
+
 			myCounter.add(1);
 		}
 
@@ -310,15 +375,18 @@ func TestSetupDataIsolation(t *testing.T) {
 	options := runner.GetOptions()
 	require.Empty(t, options.Validate())
 
-	registry := metrics.NewRegistry()
-	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	execScheduler, err := local.NewExecutionScheduler(runner, builtinMetrics, testutils.NewLogger(t))
+	testRunState := &lib.TestRunState{
+		TestPreInitState: runner.preInitState,
+		Options:          options,
+		Runner:           runner,
+		RunTags:          runner.preInitState.Registry.RootTagSet().WithTagsFromMap(options.RunTags),
+	}
+
+	execScheduler, err := local.NewExecutionScheduler(testRunState)
 	require.NoError(t, err)
 
 	mockOutput := mockoutput.New()
-	engine, err := core.NewEngine(
-		execScheduler, options, lib.RuntimeOptions{}, []output.Output{mockOutput}, testutils.NewLogger(t), registry,
-	)
+	engine, err := core.NewEngine(testRunState, execScheduler, []output.Output{mockOutput})
 	require.NoError(t, err)
 	require.NoError(t, engine.OutputManager.StartOutputs())
 	defer engine.OutputManager.StopOutputs()
@@ -333,7 +401,7 @@ func TestSetupDataIsolation(t *testing.T) {
 	go func() { errC <- run() }()
 
 	select {
-	case <-time.After(10 * time.Second):
+	case <-time.After(20 * time.Second):
 		cancel()
 		t.Fatal("Test timed out")
 	case err := <-errC:
@@ -350,7 +418,7 @@ func TestSetupDataIsolation(t *testing.T) {
 			count += int(s.Value)
 		}
 	}
-	require.Equal(t, 501, count, "mycounter should be the number of iterations + 1 for the teardown")
+	require.Equal(t, 102, count, "mycounter should be the number of iterations + 1 for the teardown")
 }
 
 func testSetupDataHelper(t *testing.T, data string) {
@@ -511,7 +579,7 @@ func TestRunnerIntegrationImports(t *testing.T) {
 				registry := metrics.NewRegistry()
 				builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 				r2, err := NewFromArchive(
-					&lib.RuntimeState{
+					&lib.TestPreInitState{
 						Logger:         testutils.NewLogger(t),
 						BuiltinMetrics: builtinMetrics,
 						Registry:       registry,
@@ -548,7 +616,7 @@ func TestVURunContext(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r2, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -599,7 +667,7 @@ func TestVURunInterrupt(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r2, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -641,7 +709,7 @@ func TestVURunInterruptDoesntPanic(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r2, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -664,7 +732,7 @@ func TestVURunInterruptDoesntPanic(t *testing.T) {
 
 			initVU, err := r.newVU(1, 1, samples)
 			require.NoError(t, err)
-			for i := 0; i < 1000; i++ {
+			for i := 0; i < 100; i++ {
 				wg.Add(1)
 				newCtx, newCancel := context.WithCancel(ctx)
 				vu := initVU.Activate(&lib.VUActivationParams{
@@ -706,7 +774,7 @@ func TestVUIntegrationGroups(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r2, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -766,7 +834,7 @@ func TestVUIntegrationMetrics(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r2, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -816,8 +884,127 @@ func TestVUIntegrationMetrics(t *testing.T) {
 	}
 }
 
+func GenerateTLSCertificate(t *testing.T, host string, notBefore time.Time, validFor time.Duration) ([]byte, []byte) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	// ECDSA, ED25519 and RSA subject keys should have the DigitalSignature
+	// KeyUsage bits set in the x509.Certificate template
+	keyUsage := x509.KeyUsageDigitalSignature
+	// Only RSA subject keys should have the KeyEncipherment KeyUsage bits set. In
+	// the context of TLS this KeyUsage is particular to RSA key exchange and
+	// authentication.
+	keyUsage |= x509.KeyUsageKeyEncipherment
+
+	notAfter := notBefore.Add(validFor)
+
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+	require.NoError(t, err)
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			Organization: []string{"Acme Co"},
+		},
+		NotBefore: notBefore,
+		NotAfter:  notAfter,
+
+		KeyUsage:              keyUsage,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		SignatureAlgorithm:    x509.SHA256WithRSA,
+	}
+
+	hosts := strings.Split(host, ",")
+	for _, h := range hosts {
+		if ip := net.ParseIP(h); ip != nil {
+			template.IPAddresses = append(template.IPAddresses, ip)
+		} else {
+			template.DNSNames = append(template.DNSNames, h)
+		}
+	}
+
+	template.IsCA = true
+	template.KeyUsage |= x509.KeyUsageCertSign
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	require.NoError(t, err)
+
+	certPem := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	require.NoError(t, err)
+
+	privBytes, err := x509.MarshalPKCS8PrivateKey(priv)
+	require.NoError(t, err)
+	keyPem := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privBytes})
+	require.NoError(t, err)
+	return certPem, keyPem
+}
+
+func GetTestServerWithCertificate(t *testing.T, certPem, key []byte) *httptest.Server {
+	server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+		}),
+		ReadHeaderTimeout: time.Second,
+		ReadTimeout:       time.Second,
+	}
+	s := &httptest.Server{}
+	s.Config = server
+
+	s.TLS = new(tls.Config)
+	if s.TLS.NextProtos == nil {
+		nextProtos := []string{"http/1.1"}
+		if s.EnableHTTP2 {
+			nextProtos = []string{"h2"}
+		}
+		s.TLS.NextProtos = nextProtos
+	}
+	cert, err := tls.X509KeyPair(certPem, key)
+	require.NoError(t, err)
+	s.TLS.Certificates = append(s.TLS.Certificates, cert)
+	for _, suite := range tls.CipherSuites() {
+		if !strings.Contains(suite.Name, "256") {
+			continue
+		}
+		s.TLS.CipherSuites = append(s.TLS.CipherSuites, suite.ID)
+	}
+	certpool := x509.NewCertPool()
+	certificate, err := x509.ParseCertificate(cert.Certificate[0])
+	require.NoError(t, err)
+	certpool.AddCert(certificate)
+	client := &http.Client{Transport: &http.Transport{}}
+	client.Transport = &http.Transport{
+		TLSClientConfig: &tls.Config{ //nolint:gosec
+			RootCAs: certpool,
+		},
+		ForceAttemptHTTP2: s.EnableHTTP2,
+	}
+	s.Listener, err = net.Listen("tcp", "")
+	require.NoError(t, err)
+	s.Listener = tls.NewListener(s.Listener, s.TLS)
+	s.URL = "https://" + s.Listener.Addr().String()
+	return s
+}
+
 func TestVUIntegrationInsecureRequests(t *testing.T) {
 	t.Parallel()
+	certPem, keyPem := GenerateTLSCertificate(t, "mybadssl.localhost", time.Now(), 0)
+	s := GetTestServerWithCertificate(t, certPem, keyPem)
+	go func() {
+		_ = s.Config.Serve(s.Listener)
+	}()
+	t.Cleanup(func() {
+		require.NoError(t, s.Config.Close())
+	})
+	host, port, err := net.SplitHostPort(s.Listener.Addr().String())
+	require.NoError(t, err)
+	ip := net.ParseIP(host)
+	mybadsslHostname, err := lib.NewHostAddress(ip, port)
+	require.NoError(t, err)
+	cert, err := x509.ParseCertificate(s.TLS.Certificates[0].Certificate[0])
+	require.NoError(t, err)
+
 	testdata := map[string]struct {
 		opts   lib.Options
 		errMsg string
@@ -840,16 +1027,19 @@ func TestVUIntegrationInsecureRequests(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			r1, err := getSimpleRunner(t, "/script.js", `
-					var http = require("k6/http");;
-					exports.default = function() { http.get("https://expired.badssl.com/"); }
+			  var http = require("k6/http");;
+        exports.default = function() { http.get("https://mybadssl.localhost/"); }
 				`)
 			require.NoError(t, err)
 			require.NoError(t, r1.SetOptions(lib.Options{Throw: null.BoolFrom(true)}.Apply(data.opts)))
 
+			r1.Bundle.Options.Hosts = map[string]*lib.HostAddress{
+				"mybadssl.localhost": mybadsslHostname,
+			}
 			registry := metrics.NewRegistry()
 			builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 			r2, err := NewFromArchive(
-				&lib.RuntimeState{
+				&lib.TestPreInitState{
 					Logger:         testutils.NewLogger(t),
 					BuiltinMetrics: builtinMetrics,
 					Registry:       registry,
@@ -860,10 +1050,12 @@ func TestVUIntegrationInsecureRequests(t *testing.T) {
 				r := r
 				t.Run(name, func(t *testing.T) {
 					t.Parallel()
-					r.Logger, _ = logtest.NewNullLogger()
+					r.preInitState.Logger, _ = logtest.NewNullLogger()
 
 					initVU, err := r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
 					require.NoError(t, err)
+					initVU.(*VU).TLSConfig.RootCAs = x509.NewCertPool() //nolint:forcetypeassert
+					initVU.(*VU).TLSConfig.RootCAs.AddCert(cert)        //nolint:forcetypeassert
 
 					ctx, cancel := context.WithCancel(context.Background())
 					defer cancel()
@@ -890,17 +1082,14 @@ func TestVUIntegrationBlacklistOption(t *testing.T) {
 	require.NoError(t, err)
 
 	cidr, err := lib.ParseCIDR("10.0.0.0/8")
-
 	require.NoError(t, err)
-	require.NoError(t, r1.SetOptions(lib.Options{
-		Throw:        null.BoolFrom(true),
-		BlacklistIPs: []*lib.IPNet{cidr},
-	}))
+	r1.Bundle.Options.Throw = null.BoolFrom(true)
+	r1.Bundle.Options.BlacklistIPs = []*lib.IPNet{cidr}
 
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r2, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -941,7 +1130,7 @@ func TestVUIntegrationBlacklistScript(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r2, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -976,15 +1165,14 @@ func TestVUIntegrationBlockHostnamesOption(t *testing.T) {
 
 	hostnames, err := types.NewNullHostnameTrie([]string{"*.io"})
 	require.NoError(t, err)
-	require.NoError(t, r1.SetOptions(lib.Options{
-		Throw:            null.BoolFrom(true),
-		BlockedHostnames: hostnames,
-	}))
+
+	r1.Bundle.Options.Throw = null.BoolFrom(true)
+	r1.Bundle.Options.BlockedHostnames = hostnames
 
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r2, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -1027,7 +1215,7 @@ func TestVUIntegrationBlockHostnamesScript(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r2, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -1081,7 +1269,7 @@ func TestVUIntegrationHosts(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r2, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -1107,6 +1295,19 @@ func TestVUIntegrationHosts(t *testing.T) {
 
 func TestVUIntegrationTLSConfig(t *testing.T) {
 	t.Parallel()
+	certPem, keyPem := GenerateTLSCertificate(t, "sha256-badssl.localhost", time.Now(), time.Hour)
+	s := GetTestServerWithCertificate(t, certPem, keyPem)
+	go func() {
+		_ = s.Config.Serve(s.Listener)
+	}()
+	t.Cleanup(func() {
+		require.NoError(t, s.Config.Close())
+	})
+	host, port, err := net.SplitHostPort(s.Listener.Addr().String())
+	require.NoError(t, err)
+	ip := net.ParseIP(host)
+	mybadsslHostname, err := lib.NewHostAddress(ip, port)
+	require.NoError(t, err)
 	unsupportedVersionErrorMsg := "remote error: tls: handshake failure"
 	for _, tag := range build.Default.ReleaseTags {
 		if tag == "go1.12" {
@@ -1127,7 +1328,10 @@ func TestVUIntegrationTLSConfig(t *testing.T) {
 			"",
 		},
 		"UnsupportedCipherSuite": {
-			lib.Options{TLSCipherSuites: &lib.TLSCipherSuites{tls.TLS_RSA_WITH_RC4_128_SHA}},
+			lib.Options{
+				TLSCipherSuites: &lib.TLSCipherSuites{tls.TLS_RSA_WITH_RC4_128_SHA},
+				TLSVersion:      &lib.TLSVersions{Max: tls.VersionTLS12},
+			},
 			"remote error: tls: handshake failure",
 		},
 		"NullVersion": {
@@ -1145,19 +1349,26 @@ func TestVUIntegrationTLSConfig(t *testing.T) {
 	}
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
+	cert, err := x509.ParseCertificate(s.TLS.Certificates[0].Certificate[0])
+	require.NoError(t, err)
 	for name, data := range testdata {
 		data := data
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			r1, err := getSimpleRunner(t, "/script.js", `
 					var http = require("k6/http");;
-					exports.default = function() { http.get("https://sha256.badssl.com/"); }
+					exports.default = function() { http.get("https://sha256-badssl.localhost/"); }
 				`)
 			require.NoError(t, err)
-			require.NoError(t, r1.SetOptions(lib.Options{Throw: null.BoolFrom(true)}.Apply(data.opts)))
 
+			opts := lib.Options{Throw: null.BoolFrom(true)}
+			require.NoError(t, r1.SetOptions(opts.Apply(data.opts)))
+
+			r1.Bundle.Options.Hosts = map[string]*lib.HostAddress{
+				"sha256-badssl.localhost": mybadsslHostname,
+			}
 			r2, err := NewFromArchive(
-				&lib.RuntimeState{
+				&lib.TestPreInitState{
 					Logger:         testutils.NewLogger(t),
 					BuiltinMetrics: builtinMetrics,
 					Registry:       registry,
@@ -1169,16 +1380,18 @@ func TestVUIntegrationTLSConfig(t *testing.T) {
 				r := r
 				t.Run(name, func(t *testing.T) {
 					t.Parallel()
-					r.Logger, _ = logtest.NewNullLogger()
+					r.preInitState.Logger, _ = logtest.NewNullLogger()
 
 					initVU, err := r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
 					require.NoError(t, err)
+					initVU.(*VU).TLSConfig.RootCAs = x509.NewCertPool() //nolint:forcetypeassert
+					initVU.(*VU).TLSConfig.RootCAs.AddCert(cert)        //nolint:forcetypeassert
 					ctx, cancel := context.WithCancel(context.Background())
 					defer cancel()
 					vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 					err = vu.RunOnce()
 					if data.errMsg != "" {
-						require.Error(t, err)
+						require.Error(t, err, "for message %q", data.errMsg)
 						assert.Contains(t, err.Error(), data.errMsg)
 					} else {
 						require.NoError(t, err)
@@ -1319,16 +1532,14 @@ func TestVUIntegrationCookiesReset(t *testing.T) {
 			}
 		`))
 	require.NoError(t, err)
-	r1.SetOptions(lib.Options{
-		Throw:        null.BoolFrom(true),
-		MaxRedirects: null.IntFrom(10),
-		Hosts:        tb.Dialer.Hosts,
-	})
+	r1.Bundle.Options.Throw = null.BoolFrom(true)
+	r1.Bundle.Options.MaxRedirects = null.IntFrom(10)
+	r1.Bundle.Options.Hosts = tb.Dialer.Hosts
 
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r2, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -1388,7 +1599,7 @@ func TestVUIntegrationCookiesNoReset(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r2, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -1423,12 +1634,12 @@ func TestVUIntegrationVUID(t *testing.T) {
 			}`,
 	)
 	require.NoError(t, err)
-	r1.SetOptions(lib.Options{Throw: null.BoolFrom(true)})
+	r1.Bundle.Options.Throw = null.BoolFrom(true)
 
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r2, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -1584,7 +1795,7 @@ func TestVUIntegrationClientCerts(t *testing.T) {
 			}
 			require.NoError(t, r1.SetOptions(opt))
 			r2, err := NewFromArchive(
-				&lib.RuntimeState{
+				&lib.TestPreInitState{
 					Logger:         testutils.NewLogger(t),
 					BuiltinMetrics: builtinMetrics,
 					Registry:       registry,
@@ -1596,7 +1807,7 @@ func TestVUIntegrationClientCerts(t *testing.T) {
 				r := r
 				t.Run(name, func(t *testing.T) {
 					t.Parallel()
-					r.Logger, _ = logtest.NewNullLogger()
+					r.preInitState.Logger, _ = logtest.NewNullLogger()
 					initVU, err := r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
 					require.NoError(t, err)
 					ctx, cancel := context.WithCancel(context.Background())
@@ -1749,7 +1960,7 @@ func TestArchiveRunningIntegrity(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r2, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -1794,7 +2005,7 @@ func TestArchiveNotPanicking(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r2, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -1980,7 +2191,7 @@ func TestSystemTags(t *testing.T) {
 			require.NotEmpty(t, bufSamples)
 			for _, sample := range bufSamples[0].GetSamples() {
 				assert.NotEmpty(t, sample.Tags)
-				for emittedTag, emittedVal := range sample.Tags.CloneTags() {
+				for emittedTag, emittedVal := range sample.Tags.Map() {
 					assert.Equal(t, tc.tag, emittedTag)
 					assert.Equal(t, tc.expVal, emittedVal)
 				}
@@ -2007,7 +2218,7 @@ func TestVUPanic(t *testing.T) {
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	r2, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         testutils.NewLogger(t),
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -2071,22 +2282,7 @@ type multiFileTestCase struct {
 
 func runMultiFileTestCase(t *testing.T, tc multiFileTestCase, tb *httpmultibin.HTTPMultiBin) {
 	t.Helper()
-	logger := testutils.NewLogger(t)
-	registry := metrics.NewRegistry()
-	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	runner, err := New(
-		&lib.RuntimeState{
-			Logger:         logger,
-			BuiltinMetrics: builtinMetrics,
-			Registry:       registry,
-			RuntimeOptions: tc.rtOpts,
-		},
-		&loader.SourceData{
-			URL:  &url.URL{Path: tc.cwd + "/script.js", Scheme: "file"},
-			Data: []byte(tc.script),
-		},
-		tc.fses,
-	)
+	runner, err := getSimpleRunner(t, tc.cwd+"/script.js", tc.script, tc.rtOpts, tc.fses)
 	if tc.expInitErr {
 		require.Error(t, err)
 		return
@@ -2115,9 +2311,13 @@ func runMultiFileTestCase(t *testing.T, tc multiFileTestCase, tb *httpmultibin.H
 		require.NoError(t, err)
 	}
 
+	logger := testutils.NewLogger(t)
+	registry := metrics.NewRegistry()
+	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
+
 	arc := runner.MakeArchive()
 	runnerFromArc, err := NewFromArchive(
-		&lib.RuntimeState{
+		&lib.TestPreInitState{
 			Logger:         logger,
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
@@ -2342,7 +2542,7 @@ func TestForceHTTP1Feature(t *testing.T) {
 			registry := metrics.NewRegistry()
 			builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 			r2, err := NewFromArchive(
-				&lib.RuntimeState{
+				&lib.TestPreInitState{
 					Logger:         testutils.NewLogger(t),
 					BuiltinMetrics: builtinMetrics,
 					Registry:       registry,
@@ -2438,9 +2638,13 @@ func TestExecutionInfo(t *testing.T) {
 			initVU, err := r.NewVU(1, 10, samples)
 			require.NoError(t, err)
 
-			registry := metrics.NewRegistry()
-			builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-			execScheduler, err := local.NewExecutionScheduler(r, builtinMetrics, testutils.NewLogger(t))
+			testRunState := &lib.TestRunState{
+				TestPreInitState: r.preInitState,
+				Options:          r.GetOptions(),
+				Runner:           r,
+			}
+
+			execScheduler, err := local.NewExecutionScheduler(testRunState)
 			require.NoError(t, err)
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -2463,6 +2667,55 @@ func TestExecutionInfo(t *testing.T) {
 
 			execState := execScheduler.GetState()
 			execState.ModCurrentlyActiveVUsCount(+1)
+			err = vu.RunOnce()
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestPromiseRejectionIsCleared(t *testing.T) {
+	t.Parallel()
+
+	r1, err := getSimpleRunner(t, "/script.js", `
+exports.default = () => {
+    let p = new Promise((res) => {
+        if (__ITER == 1) {
+            throw "oops"
+        }
+        res("yes");
+    })
+    p.then((r) => {
+        console.log(r);
+    })
+}`)
+	require.NoError(t, err)
+	registry := metrics.NewRegistry()
+	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
+	r2, err := NewFromArchive(
+		&lib.TestPreInitState{
+			Logger:         testutils.NewLogger(t),
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+		}, r1.MakeArchive())
+	require.NoError(t, err)
+
+	runners := map[string]*Runner{"Source": r1, "Archive": r2}
+	for name, r := range runners {
+		r := r
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			initVU, err := r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
+			require.NoError(t, err)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
+			err = vu.RunOnce()
+			require.NoError(t, err)
+
+			err = vu.RunOnce()
+			require.ErrorContains(t, err, "Uncaught (in promise) oops")
+
 			err = vu.RunOnce()
 			require.NoError(t, err)
 		})

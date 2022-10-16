@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package js
 
 import (
@@ -38,7 +18,6 @@ import (
 
 	"github.com/dop251/goja"
 	"github.com/oxtoacart/bpool"
-	"github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
 	"golang.org/x/net/http2"
 	"golang.org/x/time/rate"
@@ -65,48 +44,43 @@ var _ lib.Runner = &Runner{}
 var nameToCertWarning sync.Once
 
 type Runner struct {
-	Bundle         *Bundle
-	Logger         *logrus.Logger
-	defaultGroup   *lib.Group
-	builtinMetrics *metrics.BuiltinMetrics
-	registry       *metrics.Registry
+	Bundle       *Bundle
+	preInitState *lib.TestPreInitState
+	defaultGroup *lib.Group
 
 	BaseDialer net.Dialer
 	Resolver   netext.Resolver
 	// TODO: Remove ActualResolver, it's a hack to simplify mocking in tests.
 	ActualResolver netext.MultiResolver
 	RPSLimit       *rate.Limiter
+	RunTags        *metrics.TagSet
 
 	console   *console
 	setupData []byte
-
-	keylogger io.Writer
 }
 
-// New returns a new Runner for the provide source
-func New(
-	rs *lib.RuntimeState, src *loader.SourceData, filesystems map[string]afero.Fs,
-) (*Runner, error) {
-	bundle, err := NewBundle(rs.Logger, src, filesystems, rs.RuntimeOptions, rs.Registry)
+// New returns a new Runner for the provided source
+func New(piState *lib.TestPreInitState, src *loader.SourceData, filesystems map[string]afero.Fs) (*Runner, error) {
+	bundle, err := NewBundle(piState, src, filesystems)
 	if err != nil {
 		return nil, err
 	}
 
-	return NewFromBundle(rs, bundle)
+	return NewFromBundle(piState, bundle)
 }
 
 // NewFromArchive returns a new Runner from the source in the provided archive
-func NewFromArchive(rs *lib.RuntimeState, arc *lib.Archive) (*Runner, error) {
-	bundle, err := NewBundleFromArchive(rs.Logger, arc, rs.RuntimeOptions, rs.Registry)
+func NewFromArchive(piState *lib.TestPreInitState, arc *lib.Archive) (*Runner, error) {
+	bundle, err := NewBundleFromArchive(piState, arc)
 	if err != nil {
 		return nil, err
 	}
 
-	return NewFromBundle(rs, bundle)
+	return NewFromBundle(piState, bundle)
 }
 
 // NewFromBundle returns a new Runner from the provided Bundle
-func NewFromBundle(rs *lib.RuntimeState, b *Bundle) (*Runner, error) {
+func NewFromBundle(piState *lib.TestPreInitState, b *Bundle) (*Runner, error) {
 	defaultGroup, err := lib.NewGroup("", nil)
 	if err != nil {
 		return nil, err
@@ -115,20 +89,17 @@ func NewFromBundle(rs *lib.RuntimeState, b *Bundle) (*Runner, error) {
 	defDNS := types.DefaultDNSConfig()
 	r := &Runner{
 		Bundle:       b,
-		Logger:       rs.Logger,
+		preInitState: piState,
 		defaultGroup: defaultGroup,
 		BaseDialer: net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 			DualStack: true,
 		},
-		console: newConsole(rs.Logger),
+		console: newConsole(piState.Logger),
 		Resolver: netext.NewResolver(
 			net.LookupIP, 0, defDNS.Select.DNSSelect, defDNS.Policy.DNSPolicy),
 		ActualResolver: net.LookupIP,
-		builtinMetrics: rs.BuiltinMetrics,
-		registry:       rs.Registry,
-		keylogger:      rs.KeyLogger,
 	}
 
 	err = r.SetOptions(r.Bundle.Options)
@@ -152,7 +123,7 @@ func (r *Runner) NewVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.Sampl
 //nolint:funlen
 func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.SampleContainer) (*VU, error) {
 	// Instantiate a new bundle, make a VU out of it.
-	bi, err := r.Bundle.Instantiate(r.Logger, idLocal)
+	bi, err := r.Bundle.Instantiate(r.preInitState.Logger, idLocal)
 	if err != nil {
 		return nil, err
 	}
@@ -203,15 +174,17 @@ func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.Sampl
 		MaxVersion:         uint16(tlsVersions.Max),
 		Certificates:       certs,
 		Renegotiation:      tls.RenegotiateFreelyAsClient,
-		KeyLogWriter:       r.keylogger,
+		KeyLogWriter:       r.preInitState.KeyLogger,
 	}
 	// Follow NameToCertificate in https://pkg.go.dev/crypto/tls@go1.17.6#Config, leave this field nil
 	// when it is empty
 	if len(nameToCert) > 0 {
 		nameToCertWarning.Do(func() {
-			r.Logger.Warn("tlsAuth.domains option could be removed in the next releases, it's recommended to leave it empty " +
-				"and let k6 automatically detect from the provided certificate. It follows the Go's NameToCertificate " +
-				"deprecation - https://pkg.go.dev/crypto/tls@go1.17#Config.")
+			r.preInitState.Logger.Warn(
+				"tlsAuth.domains option could be removed in the next releases, it's recommended to leave it empty " +
+					"and let k6 automatically detect from the provided certificate. It follows the Go's NameToCertificate " +
+					"deprecation - https://pkg.go.dev/crypto/tls@go1.17#Config.",
+			)
 		})
 		//nolint:staticcheck // ignore SA1019 we can deprecate it but we have to continue to support the previous code.
 		tlsConfig.NameToCertificate = nameToCert
@@ -254,7 +227,7 @@ func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.Sampl
 	}
 
 	vu.state = &lib.State{
-		Logger:         vu.Runner.Logger,
+		Logger:         vu.Runner.preInitState.Logger,
 		Options:        vu.Runner.Bundle.Options,
 		Transport:      vu.Transport,
 		Dialer:         vu.Dialer,
@@ -265,9 +238,9 @@ func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.Sampl
 		VUID:           vu.ID,
 		VUIDGlobal:     vu.IDGlobal,
 		Samples:        vu.Samples,
-		Tags:           lib.NewTagMap(vu.Runner.Bundle.Options.RunTags.CloneTags()),
+		Tags:           lib.NewVUStateTags(vu.Runner.RunTags),
 		Group:          r.defaultGroup,
-		BuiltinMetrics: r.builtinMetrics,
+		BuiltinMetrics: r.preInitState.BuiltinMetrics,
 	}
 	vu.moduleVUImpl.state = vu.state
 	_ = vu.Runtime.Set("console", vu.Console)
@@ -435,14 +408,14 @@ func (r *Runner) HandleSummary(ctx context.Context, summary *lib.Summary) (map[s
 func (r *Runner) SetOptions(opts lib.Options) error {
 	r.Bundle.Options = opts
 	r.RPSLimit = nil
-	if rps := opts.RPS; rps.Valid {
+	if rps := opts.RPS; rps.Valid && rps.Int64 > 0 {
 		r.RPSLimit = rate.NewLimiter(rate.Limit(rps.Int64), 1)
 	}
 
 	// TODO: validate that all exec values are either nil or valid exported methods (or HTTP requests in the future)
 
 	if opts.ConsoleOutput.Valid {
-		c, err := newFileConsole(opts.ConsoleOutput.String, r.Logger.Formatter)
+		c, err := newFileConsole(opts.ConsoleOutput.String, r.preInitState.Logger.Formatter)
 		if err != nil {
 			return err
 		}
@@ -463,6 +436,9 @@ func (r *Runner) SetOptions(opts lib.Options) error {
 	if err := r.setResolver(opts.DNS); err != nil {
 		return err
 	}
+
+	// FIXME: add tests
+	r.RunTags = r.preInitState.Registry.RootTagSet().WithTagsFromMap(r.Bundle.Options.RunTags)
 
 	return nil
 }
@@ -539,10 +515,11 @@ func (r *Runner) runPart(
 	}
 
 	if r.Bundle.Options.SystemTags.Has(metrics.TagGroup) {
-		vu.state.Tags.Set("group", group.Path)
+		vu.state.Tags.Modify(func(currentTags *metrics.TagSet) *metrics.TagSet {
+			return currentTags.With("group", group.Path)
+		})
 	}
 	vu.state.Group = group
-
 	v, _, _, err := vu.runFn(ctx, false, fn, nil, vu.Runtime.ToValue(arg))
 
 	// deadline is reached so we have timeouted but this might've not been registered correctly
@@ -637,23 +614,26 @@ func (u *VU) Activate(params *lib.VUActivationParams) lib.ActiveVU {
 	u.Runtime.Set("__ENV", env)
 
 	opts := u.Runner.Bundle.Options
-	// TODO: maybe we can cache the original tags only clone them and add (if any) new tags on top ?
-	u.state.Tags = lib.NewTagMap(opts.RunTags.CloneTags())
-	for k, v := range params.Tags {
-		u.state.Tags.Set(k, v)
-	}
-	if opts.SystemTags.Has(metrics.TagVU) {
-		u.state.Tags.Set("vu", strconv.FormatUint(u.ID, 10))
-	}
-	if opts.SystemTags.Has(metrics.TagIter) {
-		u.state.Tags.Set("iter", strconv.FormatInt(u.iteration, 10))
-	}
-	if opts.SystemTags.Has(metrics.TagGroup) {
-		u.state.Tags.Set("group", u.state.Group.Path)
-	}
-	if opts.SystemTags.Has(metrics.TagScenario) {
-		u.state.Tags.Set("scenario", params.Scenario)
-	}
+
+	u.state.Tags.Modify(func(_ *metrics.TagSet) *metrics.TagSet {
+		// Deliberately overwrite tags from previous activations, i.e. ones that
+		// might have come from previous scenarios.
+		tags := u.Runner.RunTags.WithTagsFromMap(params.Tags)
+
+		if opts.SystemTags.Has(metrics.TagVU) {
+			tags = tags.With("vu", strconv.FormatUint(u.ID, 10))
+		}
+		if opts.SystemTags.Has(metrics.TagIter) {
+			tags = tags.With("iter", strconv.FormatInt(u.iteration, 10))
+		}
+		if opts.SystemTags.Has(metrics.TagGroup) {
+			tags = tags.With("group", u.state.Group.Path)
+		}
+		if opts.SystemTags.Has(metrics.TagScenario) {
+			tags = tags.With("scenario", params.Scenario)
+		}
+		return tags
+	})
 
 	ctx := params.RunContext
 	u.moduleVUImpl.ctx = ctx
@@ -780,8 +760,11 @@ func (u *VU) runFn(
 	}
 
 	opts := &u.Runner.Bundle.Options
+
 	if opts.SystemTags.Has(metrics.TagIter) {
-		u.state.Tags.Set("iter", strconv.FormatInt(u.state.Iteration, 10))
+		u.state.Tags.Modify(func(currentTags *metrics.TagSet) *metrics.TagSet {
+			return currentTags.With("iter", strconv.FormatInt(u.state.Iteration, 10))
+		})
 	}
 
 	startTime := time.Now()
@@ -817,9 +800,9 @@ func (u *VU) runFn(
 		u.Transport.CloseIdleConnections()
 	}
 
-	sampleTags := metrics.NewSampleTags(u.state.CloneTags())
 	u.state.Samples <- u.Dialer.GetTrail(
-		startTime, endTime, isFullIteration, isDefault, sampleTags, u.Runner.builtinMetrics)
+		startTime, endTime, isFullIteration,
+		isDefault, u.state.Tags.GetCurrentValues(), u.Runner.preInitState.BuiltinMetrics)
 
 	return v, isFullIteration, endTime.Sub(startTime), err
 }
@@ -868,4 +851,12 @@ func (s *scriptException) Hint() string {
 
 func (s *scriptException) ExitCode() exitcodes.ExitCode {
 	return exitcodes.ScriptException
+}
+
+func copyStringMap(m map[string]string) map[string]string {
+	clone := make(map[string]string, len(m))
+	for ktag, vtag := range m {
+		clone[ktag] = vtag
+	}
+	return clone
 }

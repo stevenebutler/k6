@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package minirunner
 
 import (
@@ -46,8 +26,11 @@ type MiniRunner struct {
 
 	SetupData []byte
 
-	Group   *lib.Group
-	Options lib.Options
+	Group        *lib.Group
+	Options      lib.Options
+	PreInitState *lib.TestPreInitState
+
+	runTags *metrics.TagSet
 }
 
 // MakeArchive isn't implemented, it always returns nil and is just here to
@@ -59,6 +42,9 @@ func (r MiniRunner) MakeArchive() *lib.Archive {
 // NewVU returns a new VU with an incremental ID.
 func (r *MiniRunner) NewVU(idLocal, idGlobal uint64, out chan<- metrics.SampleContainer) (lib.InitializedVU, error) {
 	state := &lib.State{VUID: idLocal, VUIDGlobal: idGlobal, Iteration: int64(-1)}
+	if r.runTags != nil {
+		state.Tags = lib.NewVUStateTags(r.runTags)
+	}
 	return &VU{
 		R:            r,
 		Out:          out,
@@ -118,6 +104,11 @@ func (r MiniRunner) GetOptions() lib.Options {
 // SetOptions allows you to override the runner options.
 func (r *MiniRunner) SetOptions(opts lib.Options) error {
 	r.Options = opts
+
+	if r.PreInitState != nil {
+		r.runTags = r.PreInitState.Registry.RootTagSet().WithTagsFromMap(r.Options.RunTags)
+	}
+
 	return nil
 }
 

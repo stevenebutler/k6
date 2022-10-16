@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package executor
 
 import (
@@ -337,7 +317,7 @@ func (car ConstantArrivalRate) Run(parentCtx context.Context, out chan<- metrics
 			int64(car.config.TimeUnit.TimeDuration()),
 		)).TimeDuration()
 
-	droppedIterationMetric := car.executionState.BuiltinMetrics.DroppedIterations
+	droppedIterationMetric := car.executionState.Test.BuiltinMetrics.DroppedIterations
 	shownWarning := false
 	metricTags := car.getMetricTags(nil)
 	for li, gi := 0, start; ; li, gi = li+1, gi+offsets[li%len(offsets)] {
@@ -353,8 +333,12 @@ func (car ConstantArrivalRate) Run(parentCtx context.Context, out chan<- metrics
 			// dropped - we aren't going to try to recover it, but
 
 			metrics.PushIfNotDone(parentCtx, out, metrics.Sample{
-				Value: 1, Metric: droppedIterationMetric,
-				Tags: metricTags, Time: time.Now(),
+				TimeSeries: metrics.TimeSeries{
+					Metric: droppedIterationMetric,
+					Tags:   metricTags,
+				},
+				Time:  time.Now(),
+				Value: 1,
 			})
 
 			// We'll try to start allocating another VU in the background,

@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2021 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package output
 
 import (
@@ -40,10 +20,12 @@ func TestSampleBufferBasics(t *testing.T) {
 	require.NoError(t, err)
 
 	single := metrics.Sample{
-		Time:   time.Now(),
-		Metric: metric,
-		Value:  float64(123),
-		Tags:   metrics.NewSampleTags(map[string]string{"tag1": "val1"}),
+		TimeSeries: metrics.TimeSeries{
+			Metric: metric,
+			Tags:   registry.RootTagSet().WithTagsFromMap(map[string]string{"tag1": "val1"}),
+		},
+		Time:  time.Now(),
+		Value: float64(123),
 	}
 	connected := metrics.ConnectedSamples{Samples: []metrics.Sample{single, single}, Time: single.Time}
 	buffer := SampleBuffer{}
@@ -88,10 +70,12 @@ func TestSampleBufferConcurrently(t *testing.T) {
 	fillBuffer := func() {
 		for i := 0; i < sampleCount; i++ {
 			buffer.AddMetricSamples([]metrics.SampleContainer{metrics.Sample{
-				Time:   time.Unix(1562324644, 0),
-				Metric: metric,
-				Value:  float64(i),
-				Tags:   metrics.NewSampleTags(map[string]string{"tag1": "val1"}),
+				TimeSeries: metrics.TimeSeries{
+					Metric: metric,
+					Tags:   registry.RootTagSet().WithTagsFromMap(map[string]string{"tag1": "val1"}),
+				},
+				Time:  time.Unix(1562324644, 0),
+				Value: float64(i),
 			}})
 			time.Sleep(time.Duration(i*sleepModifier) * time.Microsecond)
 		}

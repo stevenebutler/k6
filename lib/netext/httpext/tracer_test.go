@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package httpext
 
 import (
@@ -130,7 +110,8 @@ func TestTracer(t *testing.T) { //nolint:tparallel
 		}
 		prev = val
 	}
-	builtinMetrics := metrics.RegisterBuiltinMetrics(metrics.NewRegistry())
+	registry := metrics.NewRegistry()
+	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 
 	for tnum, isReuse := range []bool{false, true, true} { //nolint:paralleltest
 		t.Run(fmt.Sprintf("Test #%d", tnum), func(t *testing.T) {
@@ -149,7 +130,7 @@ func TestTracer(t *testing.T) { //nolint:tparallel
 				time.Sleep(traceDelay)
 			}
 			trail := tracer.Done()
-			trail.SaveSamples(builtinMetrics, metrics.IntoSampleTags(&map[string]string{"tag": "value"}))
+			trail.SaveSamples(builtinMetrics, registry.RootTagSet().With("tag", "value"))
 			samples := trail.GetSamples()
 
 			assertLaterOrZero(t, tracer.getConn, isReuse)
@@ -171,7 +152,7 @@ func TestTracer(t *testing.T) { //nolint:tparallel
 				seenMetrics[s.Metric] = true
 
 				assert.False(t, s.Time.IsZero())
-				assert.Equal(t, map[string]string{"tag": "value"}, s.Tags.CloneTags())
+				assert.Equal(t, map[string]string{"tag": "value"}, s.Tags.Map())
 
 				switch s.Metric {
 				case builtinMetrics.HTTPReqs:

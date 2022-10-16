@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package cmd
 
 import (
@@ -40,7 +20,7 @@ func getCmdInspect(gs *globalState) *cobra.Command {
 		Long:  `Inspect a script or archive.`,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			test, err := loadAndConfigureTest(gs, cmd, args, nil)
+			test, err := loadTest(gs, cmd, args)
 			if err != nil {
 				return err
 			}
@@ -82,16 +62,20 @@ func getCmdInspect(gs *globalState) *cobra.Command {
 // derive the value of `scenarios` and calculate the max test duration and VUs.
 func inspectOutputWithExecRequirements(gs *globalState, cmd *cobra.Command, test *loadedTest) (interface{}, error) {
 	// we don't actually support CLI flags here, so we pass nil as the getter
-	if err := test.consolidateDeriveAndValidateConfig(gs, cmd, nil); err != nil {
-		return nil, err
-	}
-
-	et, err := lib.NewExecutionTuple(test.derivedConfig.ExecutionSegment, test.derivedConfig.ExecutionSegmentSequence)
+	configuredTest, err := test.consolidateDeriveAndValidateConfig(gs, cmd, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	executionPlan := test.derivedConfig.Scenarios.GetFullExecutionRequirements(et)
+	et, err := lib.NewExecutionTuple(
+		configuredTest.derivedConfig.ExecutionSegment,
+		configuredTest.derivedConfig.ExecutionSegmentSequence,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	executionPlan := configuredTest.derivedConfig.Scenarios.GetFullExecutionRequirements(et)
 	duration, _ := lib.GetEndOffset(executionPlan)
 
 	return struct {
@@ -99,7 +83,7 @@ func inspectOutputWithExecRequirements(gs *globalState, cmd *cobra.Command, test
 		TotalDuration types.NullDuration `json:"totalDuration"`
 		MaxVUs        uint64             `json:"maxVUs"`
 	}{
-		test.derivedConfig.Options,
+		configuredTest.derivedConfig.Options,
 		types.NewNullDuration(duration, true),
 		lib.GetMaxPossibleVUs(executionPlan),
 	}, nil

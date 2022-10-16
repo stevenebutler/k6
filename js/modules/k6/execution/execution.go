@@ -1,30 +1,9 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2021 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package execution
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"time"
 
 	"github.com/dop251/goja"
@@ -33,6 +12,7 @@ import (
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modules"
 	"go.k6.io/k6/lib"
+	"go.k6.io/k6/metrics"
 )
 
 type (
@@ -233,8 +213,8 @@ func (mi *ModuleInstance) newVUInfo() (*goja.Object, error) {
 	}
 
 	err = o.Set("tags", rt.NewDynamicObject(&tagsDynamicObject{
-		Runtime: rt,
-		State:   vuState,
+		runtime: rt,
+		state:   vuState,
 	}))
 	return o, err
 }
@@ -316,69 +296,65 @@ func optionsAsObject(rt *goja.Runtime, options lib.Options) (*goja.Object, error
 }
 
 type tagsDynamicObject struct {
-	Runtime *goja.Runtime
-	State   *lib.State
+	runtime *goja.Runtime
+	state   *lib.State
 }
 
 // Get a property value for the key. May return nil if the property does not exist.
 func (o *tagsDynamicObject) Get(key string) goja.Value {
-	tag, ok := o.State.Tags.Get(key)
-	if !ok {
-		return nil
+	tcv := o.state.Tags.GetCurrentValues()
+	if tag, ok := tcv.Get(key); ok {
+		return o.runtime.ToValue(tag)
 	}
-	return o.Runtime.ToValue(tag)
+	return nil
 }
 
-// Set a property value for the key. It returns true if succeed.
-// String, Boolean and Number types are implicitly converted
-// to the goja's relative string representation.
-// In any other case, if the Throw option is set then an error is raised
-// otherwise just a Warning is written.
+// Set a property value for the key. It returns true if succeed. String, Boolean
+// and Number types are implicitly converted to the goja's relative string
+// representation. An exception is raised in case a denied type is provided.
 func (o *tagsDynamicObject) Set(key string, val goja.Value) bool {
-	kind := reflect.Invalid
-	if typ := val.ExportType(); typ != nil {
-		kind = typ.Kind()
-	}
-	switch kind {
-	case
-		reflect.String,
-		reflect.Bool,
-		reflect.Int64,
-		reflect.Float64:
-
-		o.State.Tags.Set(key, val.String())
-		return true
-	default:
-		reason := "only String, Boolean and Number types are accepted as a Tag value"
-		if o.State.Options.Throw.Bool {
-			panic(o.Runtime.NewTypeError(reason))
+	var err error
+	o.state.Tags.Modify(func(tags *metrics.TagSet) *metrics.TagSet {
+		newTags, applyErr := common.ApplyCustomUserTag(o.runtime, tags, key, val)
+		if applyErr != nil {
+			err = applyErr
+			return tags
 		}
-		o.State.Logger.Warnf("the execution.vu.tags.Set('%s') operation has been discarded because %s", key, reason)
-		return false
+		return newTags
+	})
+	if err == nil {
+		return true
 	}
+	panic(o.runtime.NewTypeError(err.Error()))
 }
 
 // Has returns true if the property exists.
 func (o *tagsDynamicObject) Has(key string) bool {
-	_, ok := o.State.Tags.Get(key)
-	return ok
+	ctv := o.state.Tags.GetCurrentValues()
+	if _, ok := ctv.Get(key); ok {
+		return true
+	}
+	return false
 }
 
-// Delete deletes the property for the key. It returns true on success (note, that includes missing property).
+// Delete deletes the property for the key. It returns true on success (note,
+// that includes missing property).
 func (o *tagsDynamicObject) Delete(key string) bool {
-	o.State.Tags.Delete(key)
+	o.state.Tags.Modify(func(tags *metrics.TagSet) *metrics.TagSet {
+		return tags.Without(key)
+	})
+
 	return true
 }
 
-// Keys returns a slice with all existing property keys. The order is not deterministic.
+// Keys returns a slice with all existing property keys. The order is not
+// deterministic.
 func (o *tagsDynamicObject) Keys() []string {
-	if o.State.Tags.Len() < 1 {
-		return nil
-	}
+	ctv := o.state.Tags.GetCurrentValues()
 
-	tags := o.State.Tags.Clone()
-	keys := make([]string, 0, len(tags))
-	for k := range tags {
+	tagsMap := ctv.Map()
+	keys := make([]string, 0, len(tagsMap))
+	for k := range tagsMap {
 		keys = append(keys, k)
 	}
 	return keys

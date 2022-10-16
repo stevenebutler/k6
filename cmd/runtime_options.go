@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2018 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package cmd
 
 import (
@@ -25,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
 	"gopkg.in/guregu/null.v3"
 
@@ -75,7 +56,11 @@ func saveBoolFromEnv(env map[string]string, varName string, placeholder *null.Bo
 	return nil
 }
 
-func getRuntimeOptions(flags *pflag.FlagSet, environment map[string]string) (lib.RuntimeOptions, error) {
+func getRuntimeOptions(
+	logger *logrus.Logger,
+	flags *pflag.FlagSet,
+	environment map[string]string,
+) (lib.RuntimeOptions, error) {
 	// TODO: refactor with composable helpers as a part of #883, to reduce copy-paste
 	// TODO: get these options out of the JSON config file as well?
 	opts := lib.RuntimeOptions{
@@ -124,7 +109,15 @@ func getRuntimeOptions(flags *pflag.FlagSet, environment map[string]string) (lib
 	}
 
 	if opts.IncludeSystemEnvVars.Bool { // If enabled, gather the actual system environment variables
-		opts.Env = environment
+		for k, v := range environment {
+			if !userEnvVarName.MatchString(k) {
+				logger.Warnf("invalid system environment variable name '%s'", k)
+
+				continue
+			}
+
+			opts.Env[k] = v
+		}
 	}
 
 	// Set/overwrite environment variables with custom user-supplied values

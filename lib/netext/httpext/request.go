@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package httpext
 
 import (
@@ -71,7 +51,7 @@ type ParsedHTTPRequest struct {
 	Redirects        null.Int
 	ActiveJar        *cookiejar.Jar
 	Cookies          map[string]*HTTPRequestCookie
-	Tags             map[string]string
+	Tags             *metrics.TagSet
 }
 
 // Matches non-compliant io.Closer implementations (e.g. zstd.Decoder)
@@ -187,17 +167,11 @@ func MakeRequest(ctx context.Context, state *lib.State, preq *ParsedHTTPRequest)
 		}
 	}
 
-	tags := state.CloneTags()
-	// Override any global tags with request-specific ones.
-	for k, v := range preq.Tags {
-		tags[k] = v
-	}
-
 	// Only set the name system tag if the user didn't explicitly set it beforehand,
 	// and the Name was generated from a tagged template string (via http.url).
-	if _, ok := tags["name"]; !ok && state.Options.SystemTags.Has(metrics.TagName) &&
-		preq.URL.Name != "" && preq.URL.Name != preq.URL.Clean() {
-		tags["name"] = preq.URL.Name
+	if _, ok := preq.Tags.Get(metrics.TagName.String()); !ok &&
+		state.Options.SystemTags.Has(metrics.TagName) && preq.URL.Name != "" && preq.URL.Name != preq.URL.Clean() {
+		preq.Tags = preq.Tags.With(metrics.TagName.String(), preq.URL.Name)
 	}
 
 	// Check rate limit *after* we've prepared a request; no need to wait with that part.
@@ -207,18 +181,17 @@ func MakeRequest(ctx context.Context, state *lib.State, preq *ParsedHTTPRequest)
 		}
 	}
 
-	tracerTransport := newTransport(ctx, state, tags, preq.ResponseCallback)
+	tracerTransport := newTransport(ctx, state, preq.Tags, preq.ResponseCallback)
 	var transport http.RoundTripper = tracerTransport
 
-	// Combine tags with common log fields
-	combinedLogFields := map[string]interface{}{"source": "http-debug", "vu": state.VUID, "iter": state.Iteration}
-	for k, v := range tags {
-		if _, present := combinedLogFields[k]; !present {
-			combinedLogFields[k] = v
-		}
-	}
-
 	if state.Options.HTTPDebug.String != "" {
+		// Combine tags with common log fields
+		combinedLogFields := map[string]interface{}{"source": "http-debug", "vu": state.VUID, "iter": state.Iteration}
+		for k, v := range preq.Tags.Map() {
+			if _, present := combinedLogFields[k]; !present {
+				combinedLogFields[k] = v
+			}
+		}
 		transport = httpDebugTransport{
 			originalTransport: transport,
 			httpDebugOption:   state.Options.HTTPDebug.String,

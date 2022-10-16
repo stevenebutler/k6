@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package csv
 
 import (
@@ -65,7 +45,8 @@ func TestMakeHeader(t *testing.T) {
 }
 
 func TestSampleToRow(t *testing.T) {
-	testMetric, err := metrics.NewRegistry().NewMetric("my_metric", metrics.Gauge)
+	registry := metrics.NewRegistry()
+	testMetric, err := registry.NewMetric("my_metric", metrics.Gauge)
 	require.NoError(t, err)
 
 	testData := []struct {
@@ -78,14 +59,16 @@ func TestSampleToRow(t *testing.T) {
 		{
 			testname: "One res tag, one ignored tag, one extra tag",
 			sample: &metrics.Sample{
-				Time:   time.Unix(1562324644, 0),
-				Metric: testMetric,
-				Value:  1,
-				Tags: metrics.NewSampleTags(map[string]string{
-					"tag1": "val1",
-					"tag2": "val2",
-					"tag3": "val3",
-				}),
+				TimeSeries: metrics.TimeSeries{
+					Metric: testMetric,
+					Tags: registry.RootTagSet().WithTagsFromMap(map[string]string{
+						"tag1": "val1",
+						"tag2": "val2",
+						"tag3": "val3",
+					}),
+				},
+				Time:  time.Unix(1562324644, 0),
+				Value: 1,
 			},
 			resTags:     []string{"tag1"},
 			ignoredTags: []string{"tag2"},
@@ -94,16 +77,18 @@ func TestSampleToRow(t *testing.T) {
 		{
 			testname: "Two res tags, three extra tags",
 			sample: &metrics.Sample{
-				Time:   time.Unix(1562324644, 0),
-				Metric: testMetric,
-				Value:  1,
-				Tags: metrics.NewSampleTags(map[string]string{
-					"tag1": "val1",
-					"tag2": "val2",
-					"tag3": "val3",
-					"tag4": "val4",
-					"tag5": "val5",
-				}),
+				TimeSeries: metrics.TimeSeries{
+					Metric: testMetric,
+					Tags: registry.RootTagSet().WithTagsFromMap(map[string]string{
+						"tag1": "val1",
+						"tag2": "val2",
+						"tag3": "val3",
+						"tag4": "val4",
+						"tag5": "val5",
+					}),
+				},
+				Time:  time.Unix(1562324644, 0),
+				Value: 1,
 			},
 			resTags:     []string{"tag1", "tag2"},
 			ignoredTags: []string{},
@@ -112,17 +97,19 @@ func TestSampleToRow(t *testing.T) {
 		{
 			testname: "Two res tags, two ignored, with RFC3339 timestamp",
 			sample: &metrics.Sample{
-				Time:   time.Unix(1562324644, 0),
-				Metric: testMetric,
-				Value:  1,
-				Tags: metrics.NewSampleTags(map[string]string{
-					"tag1": "val1",
-					"tag2": "val2",
-					"tag3": "val3",
-					"tag4": "val4",
-					"tag5": "val5",
-					"tag6": "val6",
-				}),
+				TimeSeries: metrics.TimeSeries{
+					Metric: testMetric,
+					Tags: registry.RootTagSet().WithTagsFromMap(map[string]string{
+						"tag1": "val1",
+						"tag2": "val2",
+						"tag3": "val3",
+						"tag4": "val4",
+						"tag5": "val5",
+						"tag6": "val6",
+					}),
+				},
+				Time:  time.Unix(1562324644, 0),
+				Value: 1,
 			},
 			resTags:     []string{"tag1", "tag3"},
 			ignoredTags: []string{"tag4", "tag6"},
@@ -224,7 +211,8 @@ func readCompressedFile(fileName string, fs afero.Fs) string {
 func TestRun(t *testing.T) {
 	t.Parallel()
 
-	testMetric, err := metrics.NewRegistry().NewMetric("my_metric", metrics.Gauge)
+	registry := metrics.NewRegistry()
+	testMetric, err := registry.NewMetric("my_metric", metrics.Gauge)
 	require.NoError(t, err)
 
 	testData := []struct {
@@ -237,25 +225,29 @@ func TestRun(t *testing.T) {
 		{
 			samples: []metrics.SampleContainer{
 				metrics.Sample{
-					Time:   time.Unix(1562324643, 0),
-					Metric: testMetric,
-					Value:  1,
-					Tags: metrics.NewSampleTags(map[string]string{
-						"check": "val1",
-						"url":   "val2",
-						"error": "val3",
-					}),
+					TimeSeries: metrics.TimeSeries{
+						Metric: testMetric,
+						Tags: registry.RootTagSet().WithTagsFromMap(map[string]string{
+							"check": "val1",
+							"url":   "val2",
+							"error": "val3",
+						}),
+					},
+					Time:  time.Unix(1562324643, 0),
+					Value: 1,
 				},
 				metrics.Sample{
-					Time:   time.Unix(1562324644, 0),
-					Metric: testMetric,
-					Value:  1,
-					Tags: metrics.NewSampleTags(map[string]string{
-						"check": "val1",
-						"url":   "val2",
-						"error": "val3",
-						"tag4":  "val4",
-					}),
+					TimeSeries: metrics.TimeSeries{
+						Metric: testMetric,
+						Tags: registry.RootTagSet().WithTagsFromMap(map[string]string{
+							"check": "val1",
+							"url":   "val2",
+							"error": "val3",
+							"tag4":  "val4",
+						}),
+					},
+					Time:  time.Unix(1562324644, 0),
+					Value: 1,
 				},
 			},
 			fileName:       "test",
@@ -266,25 +258,29 @@ func TestRun(t *testing.T) {
 		{
 			samples: []metrics.SampleContainer{
 				metrics.Sample{
-					Time:   time.Unix(1562324643, 0),
-					Metric: testMetric,
-					Value:  1,
-					Tags: metrics.NewSampleTags(map[string]string{
-						"check": "val1",
-						"url":   "val2",
-						"error": "val3",
-					}),
+					TimeSeries: metrics.TimeSeries{
+						Metric: testMetric,
+						Tags: registry.RootTagSet().WithTagsFromMap(map[string]string{
+							"check": "val1",
+							"url":   "val2",
+							"error": "val3",
+						}),
+					},
+					Time:  time.Unix(1562324643, 0),
+					Value: 1,
 				},
 				metrics.Sample{
-					Time:   time.Unix(1562324644, 0),
-					Metric: testMetric,
-					Value:  1,
-					Tags: metrics.NewSampleTags(map[string]string{
-						"check": "val1",
-						"url":   "val2",
-						"error": "val3",
-						"name":  "val4",
-					}),
+					TimeSeries: metrics.TimeSeries{
+						Metric: testMetric,
+						Tags: registry.RootTagSet().WithTagsFromMap(map[string]string{
+							"check": "val1",
+							"url":   "val2",
+							"error": "val3",
+							"name":  "val4",
+						}),
+					},
+					Time:  time.Unix(1562324644, 0),
+					Value: 1,
 				},
 			},
 			fileName:       "test.gz",
@@ -295,25 +291,29 @@ func TestRun(t *testing.T) {
 		{
 			samples: []metrics.SampleContainer{
 				metrics.Sample{
-					Time:   time.Unix(1562324644, 0),
-					Metric: testMetric,
-					Value:  1,
-					Tags: metrics.NewSampleTags(map[string]string{
-						"check": "val1",
-						"url":   "val2",
-						"error": "val3",
-					}),
+					TimeSeries: metrics.TimeSeries{
+						Metric: testMetric,
+						Tags: registry.RootTagSet().WithTagsFromMap(map[string]string{
+							"check": "val1",
+							"url":   "val2",
+							"error": "val3",
+						}),
+					},
+					Time:  time.Unix(1562324644, 0),
+					Value: 1,
 				},
 				metrics.Sample{
-					Time:   time.Unix(1562324644, 0),
-					Metric: testMetric,
-					Value:  1,
-					Tags: metrics.NewSampleTags(map[string]string{
-						"check": "val1",
-						"url":   "val2",
-						"error": "val3",
-						"name":  "val4",
-					}),
+					TimeSeries: metrics.TimeSeries{
+						Metric: testMetric,
+						Tags: registry.RootTagSet().WithTagsFromMap(map[string]string{
+							"check": "val1",
+							"url":   "val2",
+							"error": "val3",
+							"name":  "val4",
+						}),
+					},
+					Time:  time.Unix(1562324644, 0),
+					Value: 1,
 				},
 			},
 			fileName:       "test",

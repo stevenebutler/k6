@@ -85,13 +85,14 @@ var (
 		"SharedArrayBuffer",
 		"error-cause",
 		"resizable-arraybuffer", // stage 3 as of 2021 https://github.com/tc39/proposal-resizablearraybuffer
+		"hashbang",              // #comments in js - not implemented https://github.com/tc39/proposal-hashbang
 
 		"array-find-from-last",    // stage 3 as of 2021 https://github.com/tc39/proposal-array-find-from-last
 		"Array.prototype.at",      // stage 3 as of 2021 https://github.com/tc39/proposal-relative-indexing-method
 		"String.prototype.at",     // stage 3 as of 2021 https://github.com/tc39/proposal-relative-indexing-method
 		"TypedArray.prototype.at", // stage 3 as of 2021 https://github.com/tc39/proposal-relative-indexing-method
 	}
-	skipWords = []string{"yield", "generator", "Generator"}
+	skipWords = []string{"yield", "generator", "Generator", "async", "await"}
 	skipList  = map[string]bool{
 		"test/built-ins/Function/prototype/toString/AsyncFunction.js": true,
 		"test/built-ins/Object/seal/seal-generatorfunction.js":        true,
@@ -103,6 +104,53 @@ var (
 		"test/built-ins/Array/prototype/unshift/clamps-to-integer-limit.js":           true, // takes forever and is broken
 		"test/built-ins/Array/prototype/unshift/throws-if-integer-limit-exceeded.js":  true, // takes forever and is broken
 
+		// wrong tests after change in the specification https://github.com/tc39/test262/issues/3407
+		"test/language/expressions/prefix-decrement/S11.4.5_A6_T3.js":        true,
+		"test/language/expressions/prefix-decrement/S11.4.5_A6_T2.js":        true,
+		"test/language/expressions/prefix-decrement/S11.4.5_A6_T1.js":        true,
+		"test/language/expressions/postfix-increment/S11.3.1_A6_T3.js":       true,
+		"test/language/expressions/postfix-increment/S11.3.1_A6_T2.js":       true,
+		"test/language/expressions/postfix-increment/S11.3.1_A6_T1.js":       true,
+		"test/language/expressions/postfix-decrement/S11.3.2_A6_T3.js":       true,
+		"test/language/expressions/postfix-decrement/S11.3.2_A6_T1.js":       true,
+		"test/language/expressions/postfix-decrement/S11.3.2_A6_T2.js":       true,
+		"test/language/expressions/prefix-increment/S11.4.4_A6_T3.js":        true,
+		"test/language/expressions/prefix-increment/S11.4.4_A6_T2.js":        true,
+		"test/language/expressions/prefix-increment/S11.4.4_A6_T1.js":        true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.9_T2.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.9_T4.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.9_T1.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.8_T4.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.8_T2.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.8_T1.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.7_T4.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.7_T2.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.7_T1.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.6_T4.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.6_T2.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.6_T1.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.5_T4.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.5_T2.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.5_T1.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.4_T4.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.3_T4.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.4_T1.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.4_T2.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.3_T2.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.3_T1.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.2_T4.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.2_T2.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.2_T1.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.1_T4.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.1_T2.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.11_T4.js": true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.11_T2.js": true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.1_T1.js":  true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.11_T1.js": true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.10_T4.js": true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.10_T2.js": true,
+		"test/language/expressions/compound-assignment/S11.13.2_A7.10_T1.js": true,
+		"test/language/expressions/assignment/S11.13.1_A7_T3.js":             true,
 	}
 	pathBasedBlock = []string{ // This completely skips any path matching it without any kind of message
 		"test/annexB/built-ins/Date",
@@ -122,6 +170,7 @@ var (
 		"test/annexB/built-ins/String/prototype/sup",
 
 		"test/annexB/built-ins/RegExp/legacy-accessors/",
+		"test/language/literals/string/legacy-", // legecy string escapes
 
 		// Async/Promise and other totally unsupported functionality
 		"test/built-ins/AsyncArrowFunction",
@@ -134,6 +183,7 @@ var (
 		"test/built-ins/BigInt",
 		"test/built-ins/SharedArrayBuffer",
 		"test/language/eval-code/direct/async",
+		"test/language/eval-code/direct/gen-",
 		"test/language/expressions/await",
 		"test/language/expressions/async",
 		"test/language/expressions/dynamic-import",
@@ -152,6 +202,8 @@ var (
 
 		"test/built-ins/Object/prototype/__lookup", // AnnexB lookupGetter lookupSetter
 		"test/built-ins/Object/prototype/__define", // AnnexB defineGetter defineSetter
+
+		"test/language/module-code/", // this requires that we rewrite the js package in a way that it can this tests - which is unlikely to ever happen
 	}
 )
 
@@ -296,6 +348,15 @@ func (ctx *tc39TestCtx) runTC39Test(t testing.TB, name, src string, meta *tc39Me
 	_ = _262.Set("createRealm", func(goja.FunctionCall) goja.Value {
 		panic(ignorableTestError)
 	})
+	_ = _262.Set("evalScript", func(call goja.FunctionCall) goja.Value {
+		script := call.Argument(0).String()
+		result, err := vm.RunString(script)
+		if err != nil {
+			panic(err)
+		}
+		return result
+	})
+
 	vm.Set("$262", _262)
 	vm.Set("print", t.Log)
 	_, err := vm.RunProgram(sabStub)

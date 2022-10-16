@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package k6
 
 import (
@@ -153,6 +133,7 @@ func TestRandSeed(t *testing.T) {
 func TestGroup(t *testing.T) {
 	t.Parallel()
 
+	registry := metrics.NewRegistry()
 	setupGroupTest := func() (*goja.Runtime, *lib.State, *lib.Group) {
 		root, err := lib.NewGroup("", nil)
 		assert.NoError(t, err)
@@ -161,17 +142,16 @@ func TestGroup(t *testing.T) {
 		state := &lib.State{
 			Group:   root,
 			Samples: make(chan metrics.SampleContainer, 1000),
-			Tags:    lib.NewTagMap(nil),
+			Tags:    lib.NewVUStateTags(registry.RootTagSet()),
 			Options: lib.Options{
 				SystemTags: metrics.NewSystemTagSet(metrics.TagGroup),
 			},
 		}
-		state.BuiltinMetrics = metrics.RegisterBuiltinMetrics(metrics.NewRegistry())
+		state.BuiltinMetrics = metrics.RegisterBuiltinMetrics(registry)
 
 		m, ok := New().NewModuleInstance(
 			&modulestest.VU{
 				RuntimeField: rt,
-				InitEnvField: &common.InitEnvironment{},
 				CtxField:     context.Background(),
 				StateField:   state,
 			},
@@ -186,7 +166,7 @@ func TestGroup(t *testing.T) {
 		rt, state, root := setupGroupTest()
 		assert.Equal(t, state.Group, root)
 		require.NoError(t, rt.Set("fn", func() {
-			groupTag, ok := state.Tags.Get("group")
+			groupTag, ok := state.Tags.GetCurrentValues().Get("group")
 			require.True(t, ok)
 			assert.Equal(t, groupTag, "::my group")
 			assert.Equal(t, state.Group.Name, "my group")
@@ -195,7 +175,7 @@ func TestGroup(t *testing.T) {
 		_, err := rt.RunString(`k6.group("my group", fn)`)
 		assert.NoError(t, err)
 		assert.Equal(t, state.Group, root)
-		groupTag, ok := state.Tags.Get("group")
+		groupTag, ok := state.Tags.GetCurrentValues().Get("group")
 		require.True(t, ok)
 		assert.Equal(t, groupTag, root.Name)
 	})
@@ -211,6 +191,12 @@ func TestGroup(t *testing.T) {
 func checkTestRuntime(t testing.TB) (*goja.Runtime, chan metrics.SampleContainer, *metrics.BuiltinMetrics) {
 	rt := goja.New()
 
+	test := modulestest.NewRuntime(t)
+	m, ok := New().NewModuleInstance(test.VU).(*K6)
+	require.True(t, ok)
+	require.NoError(t, rt.Set("k6", m.Exports().Named))
+
+	registry := metrics.NewRegistry()
 	root, err := lib.NewGroup("", nil)
 	assert.NoError(t, err)
 	samples := make(chan metrics.SampleContainer, 1000)
@@ -219,23 +205,11 @@ func checkTestRuntime(t testing.TB) (*goja.Runtime, chan metrics.SampleContainer
 		Options: lib.Options{
 			SystemTags: &metrics.DefaultSystemTagSet,
 		},
-		Samples: samples,
-		Tags: lib.NewTagMap(map[string]string{
-			"group": root.Path,
-		}),
+		Samples:        samples,
+		Tags:           lib.NewVUStateTags(registry.RootTagSet().WithTagsFromMap(map[string]string{"group": root.Path})),
+		BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
 	}
-
-	state.BuiltinMetrics = metrics.RegisterBuiltinMetrics(metrics.NewRegistry())
-	m, ok := New().NewModuleInstance(
-		&modulestest.VU{
-			RuntimeField: rt,
-			InitEnvField: &common.InitEnvironment{},
-			CtxField:     context.Background(),
-			StateField:   state,
-		},
-	).(*K6)
-	require.True(t, ok)
-	require.NoError(t, rt.Set("k6", m.Exports().Named))
+	test.MoveToVUContext(state)
 
 	return rt, samples, state.BuiltinMetrics
 }
@@ -258,7 +232,7 @@ func TestCheckObject(t *testing.T) {
 		assert.Equal(t, map[string]string{
 			"group": "",
 			"check": "check",
-		}, sample.Tags.CloneTags())
+		}, sample.Tags.Map())
 	}
 
 	t.Run("Multiple", func(t *testing.T) {
@@ -317,7 +291,7 @@ func TestCheckArray(t *testing.T) {
 		assert.Equal(t, map[string]string{
 			"group": "",
 			"check": "0",
-		}, sample.Tags.CloneTags())
+		}, sample.Tags.Map())
 	}
 }
 
@@ -362,7 +336,7 @@ func TestCheckThrows(t *testing.T) {
 		assert.Equal(t, map[string]string{
 			"group": "",
 			"check": "a",
-		}, sample.Tags.CloneTags())
+		}, sample.Tags.Map())
 	}
 }
 
@@ -415,7 +389,7 @@ func TestCheckTypes(t *testing.T) {
 						assert.Equal(t, map[string]string{
 							"group": "",
 							"check": "check",
-						}, sample.Tags.CloneTags())
+						}, sample.Tags.Map())
 					}
 				})
 			}
@@ -432,22 +406,22 @@ func TestCheckContextExpiry(t *testing.T) {
 	require.NoError(t, err)
 
 	samples := make(chan metrics.SampleContainer, 1000)
+	registry := metrics.NewRegistry()
 	state := &lib.State{
 		Group: root,
 		Options: lib.Options{
 			SystemTags: &metrics.DefaultSystemTagSet,
 		},
 		Samples: samples,
-		Tags: lib.NewTagMap(map[string]string{
+		Tags: lib.NewVUStateTags(registry.RootTagSet().WithTagsFromMap(map[string]string{
 			"group": root.Path,
-		}),
+		})),
+		BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
 	}
 
-	state.BuiltinMetrics = metrics.RegisterBuiltinMetrics(metrics.NewRegistry())
 	m, ok := New().NewModuleInstance(
 		&modulestest.VU{
 			RuntimeField: rt,
-			InitEnvField: &common.InitEnvironment{},
 			CtxField:     ctx,
 			StateField:   state,
 		},
@@ -496,6 +470,6 @@ func TestCheckTags(t *testing.T) {
 			"check": "check",
 			"a":     "1",
 			"b":     "2",
-		}, sample.Tags.CloneTags())
+		}, sample.Tags.Map())
 	}
 }

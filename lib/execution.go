@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package lib
 
 import (
@@ -141,18 +121,17 @@ const (
 // around pausing, and uninitializedUnplannedVUs for restricting the number of
 // unplanned VUs being initialized.
 type ExecutionState struct {
-	// A copy of the options, so the different executors have access to them.
-	// They will need to access things like the current execution segment, the
-	// per-run metrics tags, etc.
+	// A portal to the broader test run state, so the different executors have
+	// access to the test options, built-in metrics, etc.. They will need to
+	// access things like the current execution segment, the per-run metrics
+	// tags, different metrics to emit, etc.
 	//
-	// Obviously, they are not meant to be changed... They should be a constant
-	// during the execution of a single test, but we can't easily enforce that
-	// via the Go type system...
-	Options Options
+	// Obviously, things here are not meant to be changed... They should be a
+	// constant during the execution of a single test, but we can't easily
+	// enforce that via the Go type system...
+	Test *TestRunState
 
 	ExecutionTuple *ExecutionTuple // TODO Rename, possibly move
-
-	BuiltinMetrics *metrics.BuiltinMetrics
 
 	// vus is the shared channel buffer that contains all of the VUs that have
 	// been initialized and aren't currently being used by a executor.
@@ -276,8 +255,7 @@ type ExecutionState struct {
 // with zeros. It also makes sure that the initial state is unpaused, by
 // setting resumeNotify to an already closed channel.
 func NewExecutionState(
-	options Options, et *ExecutionTuple, builtinMetrics *metrics.BuiltinMetrics,
-	maxPlannedVUs, maxPossibleVUs uint64,
+	testRunState *TestRunState, et *ExecutionTuple, maxPlannedVUs, maxPossibleVUs uint64,
 ) *ExecutionState {
 	resumeNotify := make(chan struct{})
 	close(resumeNotify) // By default the ExecutionState starts unpaused
@@ -286,9 +264,8 @@ func NewExecutionState(
 
 	segIdx := NewSegmentedIndex(et)
 	return &ExecutionState{
-		Options:        options,
+		Test:           testRunState,
 		ExecutionTuple: et,
-		BuiltinMetrics: builtinMetrics,
 
 		vus: make(chan InitializedVU, maxPossibleVUs),
 

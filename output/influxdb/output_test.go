@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package influxdb
 
 import (
@@ -108,7 +88,8 @@ func testOutputCycle(t testing.TB, handler http.HandlerFunc, body func(testing.T
 func TestOutput(t *testing.T) {
 	t.Parallel()
 
-	metric, err := metrics.NewRegistry().NewMetric("test_gauge", metrics.Gauge)
+	registry := metrics.NewRegistry()
+	metric, err := registry.NewMetric("test_gauge", metrics.Gauge)
 	require.NoError(t, err)
 
 	var samplesRead int
@@ -134,13 +115,15 @@ func TestOutput(t *testing.T) {
 		samples := make(metrics.Samples, 10)
 		for i := 0; i < len(samples); i++ {
 			samples[i] = metrics.Sample{
-				Metric: metric,
-				Time:   time.Now(),
-				Tags: metrics.NewSampleTags(map[string]string{
-					"something": "else",
-					"VU":        "21",
-					"else":      "something",
-				}),
+				TimeSeries: metrics.TimeSeries{
+					Metric: metric,
+					Tags: registry.RootTagSet().WithTagsFromMap(map[string]string{
+						"something": "else",
+						"VU":        "21",
+						"else":      "something",
+					}),
+				},
+				Time:  time.Now(),
 				Value: 2.0,
 			}
 		}
@@ -175,7 +158,8 @@ func TestOutputFlushMetricsConcurrency(t *testing.T) {
 		ts.Close()
 	}()
 
-	metric, err := metrics.NewRegistry().NewMetric("test_gauge", metrics.Gauge)
+	registry := metrics.NewRegistry()
+	metric, err := registry.NewMetric("test_gauge", metrics.Gauge)
 	require.NoError(t, err)
 
 	o, err := newOutput(output.Params{
@@ -191,8 +175,12 @@ func TestOutputFlushMetricsConcurrency(t *testing.T) {
 			wg.Add(1)
 			o.AddMetricSamples([]metrics.SampleContainer{metrics.Samples{
 				metrics.Sample{
-					Metric: metric,
-					Value:  2.0,
+					TimeSeries: metrics.TimeSeries{
+						Metric: metric,
+						Tags:   registry.RootTagSet(),
+					},
+					Time:  time.Now(),
+					Value: 2.0,
 				},
 			}})
 			o.flushMetrics()

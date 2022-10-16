@@ -1,31 +1,13 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2018 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package cmd
 
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net/url"
 	"testing"
 
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,7 +31,10 @@ func testRuntimeOptionsCase(t *testing.T, tc runtimeOptionsTestCase) {
 	flags := runtimeOptionFlagSet(tc.useSysEnv)
 	require.NoError(t, flags.Parse(tc.cliFlags))
 
-	rtOpts, err := getRuntimeOptions(flags, tc.systemEnv)
+	logger := logrus.New()
+	logger.Out = io.Discard
+
+	rtOpts, err := getRuntimeOptions(logger, flags, tc.systemEnv)
 	if tc.expErr {
 		require.Error(t, err)
 		return
@@ -81,12 +66,15 @@ func testRuntimeOptionsCase(t *testing.T, tc runtimeOptionsTestCase) {
 	ts := newGlobalTestState(t) // TODO: move upwards, make this into an almost full integration test
 	registry := metrics.NewRegistry()
 	test := &loadedTest{
-		sourceRootPath:  "script.js",
-		source:          &loader.SourceData{Data: jsCode.Bytes(), URL: &url.URL{Path: "/script.js", Scheme: "file"}},
-		fileSystems:     map[string]afero.Fs{"file": fs},
-		runtimeOptions:  rtOpts,
-		metricsRegistry: registry,
-		builtInMetrics:  metrics.RegisterBuiltinMetrics(registry),
+		sourceRootPath: "script.js",
+		source:         &loader.SourceData{Data: jsCode.Bytes(), URL: &url.URL{Path: "/script.js", Scheme: "file"}},
+		fileSystems:    map[string]afero.Fs{"file": fs},
+		preInitState: &lib.TestPreInitState{
+			Logger:         ts.logger,
+			RuntimeOptions: rtOpts,
+			Registry:       registry,
+			BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
+		},
 	}
 
 	require.NoError(t, test.initializeFirstRunner(ts.globalState))
@@ -97,12 +85,15 @@ func testRuntimeOptionsCase(t *testing.T, tc runtimeOptionsTestCase) {
 
 	getRunnerErr := func(rtOpts lib.RuntimeOptions) *loadedTest {
 		return &loadedTest{
-			sourceRootPath:  "script.tar",
-			source:          &loader.SourceData{Data: archiveBuf.Bytes(), URL: &url.URL{Path: "/script.tar", Scheme: "file"}},
-			fileSystems:     map[string]afero.Fs{"file": fs},
-			runtimeOptions:  rtOpts,
-			metricsRegistry: registry,
-			builtInMetrics:  metrics.RegisterBuiltinMetrics(registry),
+			sourceRootPath: "script.tar",
+			source:         &loader.SourceData{Data: archiveBuf.Bytes(), URL: &url.URL{Path: "/script.tar", Scheme: "file"}},
+			fileSystems:    map[string]afero.Fs{"file": fs},
+			preInitState: &lib.TestPreInitState{
+				Logger:         ts.logger,
+				RuntimeOptions: rtOpts,
+				Registry:       registry,
+				BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
+			},
 		}
 	}
 
@@ -127,11 +118,12 @@ func TestRuntimeOptions(t *testing.T) {
 	runtimeOptionsTestCases := map[string]runtimeOptionsTestCase{
 		"empty env": {
 			useSysEnv: true,
+			systemEnv: map[string]string{},
 			// everything else is empty
 			expRTOpts: lib.RuntimeOptions{
 				IncludeSystemEnvVars: null.NewBool(true, false),
 				CompatibilityMode:    defaultCompatMode,
-				Env:                  nil,
+				Env:                  map[string]string{},
 			},
 		},
 		"disabled sys env by default": {
@@ -218,6 +210,39 @@ func TestRuntimeOptions(t *testing.T) {
 				IncludeSystemEnvVars: null.NewBool(true, true),
 				CompatibilityMode:    defaultCompatMode,
 				Env:                  map[string]string{"test1": "val1"},
+			},
+		},
+		"ignore invalid name system env var name 1": {
+			useSysEnv: false,
+			systemEnv: map[string]string{"test a": "val1", "valid": "val2"},
+			cliFlags:  []string{"--include-system-env-vars=true"},
+			expErr:    false,
+			expRTOpts: lib.RuntimeOptions{
+				IncludeSystemEnvVars: null.NewBool(true, true),
+				CompatibilityMode:    defaultCompatMode,
+				Env:                  map[string]string{"valid": "val2"},
+			},
+		},
+		"ignore invalid name system env var name 2": {
+			useSysEnv: false,
+			systemEnv: map[string]string{"1var": "val1", "valid": "val2"},
+			cliFlags:  []string{"--include-system-env-vars=true"},
+			expErr:    false,
+			expRTOpts: lib.RuntimeOptions{
+				IncludeSystemEnvVars: null.NewBool(true, true),
+				CompatibilityMode:    defaultCompatMode,
+				Env:                  map[string]string{"valid": "val2"},
+			},
+		},
+		"ignore invalid name system env var name 3": {
+			useSysEnv: false,
+			systemEnv: map[string]string{"уникод": "unicode-disabled", "valid": "val2"},
+			cliFlags:  []string{"--include-system-env-vars=true"},
+			expErr:    false,
+			expRTOpts: lib.RuntimeOptions{
+				IncludeSystemEnvVars: null.NewBool(true, true),
+				CompatibilityMode:    defaultCompatMode,
+				Env:                  map[string]string{"valid": "val2"},
 			},
 		},
 		"run only system env": {

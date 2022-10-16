@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package cmd
 
 import (
@@ -65,7 +45,8 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) error {
 
 	// Write the full consolidated *and derived* options back to the Runner.
 	conf := test.derivedConfig
-	if err = test.initRunner.SetOptions(conf.Options); err != nil {
+	testRunState, err := test.buildTestRunState(conf.Options)
+	if err != nil {
 		return err
 	}
 
@@ -86,10 +67,10 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) error {
 	runCtx, runCancel := context.WithCancel(lingerCtx)
 	defer runCancel()
 
-	logger := c.gs.logger
+	logger := testRunState.Logger
 	// Create a local execution scheduler wrapping the runner.
 	logger.Debug("Initializing the execution scheduler...")
-	execScheduler, err := local.NewExecutionScheduler(test.initRunner, test.builtInMetrics, logger)
+	execScheduler, err := local.NewExecutionScheduler(testRunState)
 	if err != nil {
 		return err
 	}
@@ -125,10 +106,7 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) error {
 	// TODO: remove this completely
 	// Create the engine.
 	initBar.Modify(pb.WithConstProgress(0, "Init engine"))
-	engine, err := core.NewEngine(
-		execScheduler, conf.Options, test.runtimeOptions,
-		outputs, logger, test.metricsRegistry,
-	)
+	engine, err := core.NewEngine(testRunState, execScheduler, outputs)
 	if err != nil {
 		return err
 	}
@@ -230,7 +208,7 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Handle the end-of-test summary.
-	if !test.runtimeOptions.NoSummary.Bool {
+	if !testRunState.RuntimeOptions.NoSummary.Bool {
 		engine.MetricsEngine.MetricsLock.Lock() // TODO: refactor so this is not needed
 		summaryResult, err := test.initRunner.HandleSummary(globalCtx, &lib.Summary{
 			Metrics:         engine.MetricsEngine.ObservedMetrics,
@@ -268,8 +246,8 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) error {
 	logger.Debug("Waiting for engine processes to finish...")
 	engineWait()
 	logger.Debug("Everything has finished, exiting k6!")
-	if test.keywriter != nil {
-		if err := test.keywriter.Close(); err != nil {
+	if test.keyLogger != nil {
+		if err := test.keyLogger.Close(); err != nil {
 			logger.WithError(err).Warn("Error while closing the SSLKEYLOGFILE")
 		}
 	}

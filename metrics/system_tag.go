@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package metrics
 
 import (
@@ -31,56 +11,6 @@ import (
 // which system tags should be included with which metrics.
 //go:generate enumer -type=SystemTagSet -transform=snake -trimprefix=Tag -output system_tag_set_gen.go
 type SystemTagSet uint32
-
-// TagSet is a string to bool map (for lookup efficiency) that is used to keep track
-// of which system tags and non-system tags to include.
-type TagSet map[string]bool
-
-// UnmarshalText converts the tag list to TagSet.
-func (i *TagSet) UnmarshalText(data []byte) error {
-	list := bytes.Split(data, []byte(","))
-	if *i == nil {
-		*i = make(TagSet, len(list))
-	}
-
-	for _, key := range list {
-		key := strings.TrimSpace(string(key))
-		if key == "" {
-			continue
-		}
-		(*i)[key] = true
-	}
-
-	return nil
-}
-
-// MarshalJSON converts the TagSet to a list (JS array).
-func (i *TagSet) MarshalJSON() ([]byte, error) {
-	var tags []string
-	if *i != nil {
-		tags = make([]string, 0, len(*i))
-		for tag := range *i {
-			tags = append(tags, tag)
-		}
-		sort.Strings(tags)
-	}
-
-	return json.Marshal(tags)
-}
-
-// UnmarshalJSON converts the tag list back to expected tag set.
-func (i *TagSet) UnmarshalJSON(data []byte) error {
-	var tags []string
-	if err := json.Unmarshal(data, &tags); err != nil {
-		return err
-	}
-	*i = make(TagSet, len(tags))
-	for _, tag := range tags {
-		(*i)[tag] = true
-	}
-
-	return nil
-}
 
 // Default system tags includes all of the system tags emitted with metrics by default.
 const (
@@ -128,9 +58,9 @@ func (i *SystemTagSet) Has(tag SystemTagSet) bool {
 	return *i&tag != 0
 }
 
-// Map returns the TagSet with current value from SystemTagSet
-func (i SystemTagSet) Map() TagSet {
-	m := TagSet{}
+// Map returns the EnabledTags with current value from SystemTagSet
+func (i SystemTagSet) Map() EnabledTags {
+	m := EnabledTags{}
 	for _, tag := range SystemTagSetValues() {
 		if i.Has(tag) {
 			m[tag.String()] = true

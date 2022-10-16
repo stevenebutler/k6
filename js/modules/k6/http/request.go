@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package http
 
 import (
@@ -136,8 +116,8 @@ func (c *Client) parseRequest(
 		Throw:            state.Options.Throw.Bool,
 		Redirects:        state.Options.MaxRedirects,
 		Cookies:          make(map[string]*httpext.HTTPRequestCookie),
-		Tags:             make(map[string]string),
 		ResponseCallback: c.responseCallback,
+		Tags:             c.moduleInstance.vu.State().Tags.GetCurrentValues(),
 	}
 
 	if state.Options.DiscardResponseBodies.Bool {
@@ -328,17 +308,11 @@ func (c *Client) parseRequest(
 			case "redirects":
 				result.Redirects = null.IntFrom(params.Get(k).ToInteger())
 			case "tags":
-				tagsV := params.Get(k)
-				if goja.IsUndefined(tagsV) || goja.IsNull(tagsV) {
-					continue
+				newTags, err := common.ApplyCustomUserTags(rt, result.Tags, params.Get(k))
+				if err != nil {
+					return nil, fmt.Errorf("invalid HTTP request metric tags: %w", err)
 				}
-				tagObj := tagsV.ToObject(rt)
-				if tagObj == nil {
-					continue
-				}
-				for _, key := range tagObj.Keys() {
-					result.Tags[key] = tagObj.Get(key).String()
-				}
+				result.Tags = newTags
 			case "auth":
 				result.Auth = params.Get(k).String()
 			case "timeout":

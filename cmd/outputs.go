@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2021 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package cmd
 
 import (
@@ -77,7 +57,9 @@ func getPossibleIDList(constrs map[string]func(output.Params) (output.Output, er
 	return strings.Join(res, ", ")
 }
 
-func createOutputs(gs *globalState, test *loadedTest, executionPlan []lib.ExecutionStep) ([]output.Output, error) {
+func createOutputs(
+	gs *globalState, test *loadedAndConfiguredTest, executionPlan []lib.ExecutionStep,
+) ([]output.Output, error) {
 	outputConstructors, err := getAllOutputConstructors()
 	if err != nil {
 		return nil, err
@@ -90,7 +72,7 @@ func createOutputs(gs *globalState, test *loadedTest, executionPlan []lib.Execut
 		StdErr:         gs.stdErr,
 		FS:             gs.fs,
 		ScriptOptions:  test.derivedConfig.Options,
-		RuntimeOptions: test.runtimeOptions,
+		RuntimeOptions: test.preInitState.RuntimeOptions,
 		ExecutionPlan:  executionPlan,
 	}
 	result := make([]output.Output, 0, len(test.derivedConfig.Out))
@@ -120,7 +102,7 @@ func createOutputs(gs *globalState, test *loadedTest, executionPlan []lib.Execut
 		}
 
 		if builtinMetricOut, ok := out.(output.WithBuiltinMetrics); ok {
-			builtinMetricOut.SetBuiltinMetrics(test.builtInMetrics)
+			builtinMetricOut.SetBuiltinMetrics(test.preInitState.BuiltinMetrics)
 		}
 
 		result = append(result, out)

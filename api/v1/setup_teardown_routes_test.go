@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2018 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package v1
 
 import (
@@ -31,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/guregu/null.v3"
@@ -40,10 +19,8 @@ import (
 	"go.k6.io/k6/core/local"
 	"go.k6.io/k6/js"
 	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/lib/types"
 	"go.k6.io/k6/loader"
-	"go.k6.io/k6/metrics"
 )
 
 func TestSetupData(t *testing.T) {
@@ -81,7 +58,6 @@ func TestSetupData(t *testing.T) {
 				{"GET", "", `{}`},
 			},
 		}, {
-
 			name: "noSetup",
 			script: []byte(`
 			export default function(data) {
@@ -140,32 +116,29 @@ func TestSetupData(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			logger := logrus.New()
-			logger.SetOutput(testutils.NewTestOutput(t))
-			registry := metrics.NewRegistry()
-			builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-
+			piState := getTestPreInitState(t)
 			runner, err := js.New(
-				&lib.RuntimeState{
-					Logger:         logger,
-					BuiltinMetrics: builtinMetrics,
-					Registry:       registry,
+				piState,
+				&loader.SourceData{
+					URL:  &url.URL{Path: "/script.js"},
+					Data: testCase.script,
 				},
-				&loader.SourceData{URL: &url.URL{Path: "/script.js"}, Data: testCase.script},
 				nil,
 			)
 			require.NoError(t, err)
-			runner.SetOptions(lib.Options{
+
+			testState := getTestRunState(t, lib.Options{
 				Paused:          null.BoolFrom(true),
 				VUs:             null.IntFrom(2),
 				Iterations:      null.IntFrom(3),
 				NoSetup:         null.BoolFrom(true),
 				SetupTimeout:    types.NullDurationFrom(5 * time.Second),
 				TeardownTimeout: types.NullDurationFrom(5 * time.Second),
-			})
-			execScheduler, err := local.NewExecutionScheduler(runner, builtinMetrics, logger)
+			}, runner)
+
+			execScheduler, err := local.NewExecutionScheduler(testState)
 			require.NoError(t, err)
-			engine, err := core.NewEngine(execScheduler, runner.GetOptions(), lib.RuntimeOptions{}, nil, logger, registry)
+			engine, err := core.NewEngine(testState, execScheduler, nil)
 			require.NoError(t, err)
 
 			require.NoError(t, engine.OutputManager.StartOutputs())

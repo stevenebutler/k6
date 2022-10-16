@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package js
 
 import (
@@ -46,11 +26,14 @@ func BenchmarkHTTPRequests(b *testing.B) {
 			}
 		`), lib.RuntimeOptions{CompatibilityMode: null.StringFrom("extended")})
 	require.NoError(b, err)
+
 	err = r.SetOptions(lib.Options{
 		Throw:          null.BoolFrom(true),
 		MaxRedirects:   null.IntFrom(10),
 		Hosts:          tb.Dialer.Hosts,
 		NoCookiesReset: null.BoolFrom(true),
+		SystemTags:     &metrics.DefaultSystemTagSet,
+		RunTags:        map[string]string{"myapp": "myhttpbench"},
 	})
 	require.NoError(b, err)
 

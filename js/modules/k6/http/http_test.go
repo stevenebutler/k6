@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package http
 
 import (
@@ -30,23 +10,19 @@ import (
 
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modulestest"
-	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/netext/httpext"
 	"go.k6.io/k6/metrics"
 )
 
 //nolint:golint, revive
 func getTestModuleInstance(
-	t testing.TB, ctx context.Context, state *lib.State,
-) (*goja.Runtime, *ModuleInstance) {
+	t testing.TB,
+) (*goja.Runtime, *ModuleInstance, *modulestest.VU) {
 	rt := goja.New()
 	rt.SetFieldNameMapper(common.FieldNameMapper{})
 
-	if ctx == nil {
-		dummyCtx, cancel := context.WithCancel(context.Background())
-		t.Cleanup(cancel)
-		ctx = dummyCtx
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 
 	root := New()
 	mockVU := &modulestest.VU{
@@ -54,15 +30,14 @@ func getTestModuleInstance(
 		InitEnvField: &common.InitEnvironment{
 			Registry: metrics.NewRegistry(),
 		},
-		CtxField:   ctx,
-		StateField: state,
+		CtxField: ctx,
 	}
 	mi, ok := root.NewModuleInstance(mockVU).(*ModuleInstance)
 	require.True(t, ok)
 
 	require.NoError(t, rt.Set("http", mi.Exports().Default))
 
-	return rt, mi
+	return rt, mi, mockVU
 }
 
 func TestTagURL(t *testing.T) {
@@ -79,7 +54,7 @@ func TestTagURL(t *testing.T) {
 		expr, data := expr, data
 		t.Run("expr="+expr, func(t *testing.T) {
 			t.Parallel()
-			rt, _ := getTestModuleInstance(t, nil, nil)
+			rt, _, _ := getTestModuleInstance(t)
 			tag, err := httpext.NewURL(data.u, data.n)
 			require.NoError(t, err)
 			v, err := rt.RunString("http.url`" + expr + "`")
