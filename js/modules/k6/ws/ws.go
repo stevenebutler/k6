@@ -1,3 +1,5 @@
+// Package ws implements a k6/ws for k6. It provides basic functionality to communicate over websockets
+// that *blocks* the event loop while the connection is opened.
 package ws
 
 import (
@@ -5,7 +7,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -63,9 +65,10 @@ func (*RootModule) NewModuleInstance(m modules.VU) modules.Instance {
 // ErrWSInInitContext is returned when websockets are using in the init context
 var ErrWSInInitContext = common.NewInitContextError("using websockets in the init context is not supported")
 
+// Socket is the representation of the websocket returned to the js.
 type Socket struct {
 	rt            *goja.Runtime
-	ctx           context.Context
+	ctx           context.Context //nolint:containedctx
 	conn          *websocket.Conn
 	eventHandlers map[string][]goja.Callable
 	scheduled     chan goja.Callable
@@ -75,12 +78,13 @@ type Socket struct {
 	pingSendTimestamps map[string]time.Time
 	pingSendCounter    int
 
-	tags           *metrics.TagSet
+	tagsAndMeta    *metrics.TagsAndMeta
 	samplesOutput  chan<- metrics.SampleContainer
 	builtinMetrics *metrics.BuiltinMetrics
 }
 
-type WSHTTPResponse struct {
+// HTTPResponse is the http response returned by ws.connect.
+type HTTPResponse struct {
 	URL     string            `json:"url"`
 	Status  int               `json:"status"`
 	Headers map[string]string `json:"headers"`
@@ -102,8 +106,9 @@ func (mi *WS) Exports() modules.Exports {
 
 // Connect establishes a WebSocket connection based on the parameters provided.
 // TODO: refactor to reduce the method complexity
-//nolint:funlen,gocognit,gocyclo
-func (mi *WS) Connect(url string, args ...goja.Value) (*WSHTTPResponse, error) {
+//
+//nolint:funlen,gocognit,gocyclo,cyclop
+func (mi *WS) Connect(url string, args ...goja.Value) (*HTTPResponse, error) {
 	ctx := mi.vu.Context()
 	rt := mi.vu.Runtime()
 	state := mi.vu.State()
@@ -134,11 +139,11 @@ func (mi *WS) Connect(url string, args ...goja.Value) (*WSHTTPResponse, error) {
 
 	enableCompression := false
 
-	tags := state.Tags.GetCurrentValues()
+	tagsAndMeta := state.Tags.GetCurrentValues()
 	jar := state.CookieJar
 
 	// Parse the optional second argument (params)
-	if !goja.IsUndefined(paramsV) && !goja.IsNull(paramsV) {
+	if !goja.IsUndefined(paramsV) && !goja.IsNull(paramsV) { //nolint:nestif
 		params := paramsV.ToObject(rt)
 		for _, k := range params.Keys() {
 			switch k {
@@ -155,11 +160,9 @@ func (mi *WS) Connect(url string, args ...goja.Value) (*WSHTTPResponse, error) {
 					header.Set(key, headersObj.Get(key).String())
 				}
 			case "tags":
-				newTags, err := common.ApplyCustomUserTags(rt, tags, params.Get(k))
-				if err != nil {
+				if err := common.ApplyCustomUserTags(rt, &tagsAndMeta, params.Get(k)); err != nil {
 					return nil, fmt.Errorf("invalid ws.connect() metric tags: %w", err)
 				}
-				tags = newTags
 			case "jar":
 				jarV := params.Get(k)
 				if goja.IsUndefined(jarV) || goja.IsNull(jarV) {
@@ -186,12 +189,9 @@ func (mi *WS) Connect(url string, args ...goja.Value) (*WSHTTPResponse, error) {
 				enableCompression = true
 			}
 		}
-
 	}
 
-	if state.Options.SystemTags.Has(metrics.TagURL) {
-		tags = tags.With("url", url)
-	}
+	tagsAndMeta.SetSystemTagOrMetaIfEnabled(state.Options.SystemTags, metrics.TagURL, url)
 
 	// Overriding the NextProtos to avoid talking http2
 	var tlsConfig *tls.Config
@@ -221,18 +221,17 @@ func (mi *WS) Connect(url string, args ...goja.Value) (*WSHTTPResponse, error) {
 
 	if state.Options.SystemTags.Has(metrics.TagIP) && conn.RemoteAddr() != nil {
 		if ip, _, err := net.SplitHostPort(conn.RemoteAddr().String()); err == nil {
-			// TODO: make as a not indexable
-			tags = tags.With("ip", ip)
+			tagsAndMeta.SetSystemTagOrMeta(metrics.TagIP, ip)
 		}
 	}
 
 	if httpResponse != nil {
 		if state.Options.SystemTags.Has(metrics.TagStatus) {
-			tags = tags.With("status", strconv.Itoa(httpResponse.StatusCode))
+			tagsAndMeta.SetSystemTagOrMeta(metrics.TagStatus, strconv.Itoa(httpResponse.StatusCode))
 		}
 
 		if state.Options.SystemTags.Has(metrics.TagSubproto) {
-			tags = tags.With("subproto", httpResponse.Header.Get("Sec-WebSocket-Protocol"))
+			tagsAndMeta.SetSystemTagOrMeta(metrics.TagSubproto, httpResponse.Header.Get("Sec-WebSocket-Protocol"))
 		}
 	}
 
@@ -245,7 +244,7 @@ func (mi *WS) Connect(url string, args ...goja.Value) (*WSHTTPResponse, error) {
 		scheduled:          make(chan goja.Callable),
 		done:               make(chan struct{}),
 		samplesOutput:      state.Samples,
-		tags:               tags,
+		tagsAndMeta:        &tagsAndMeta,
 		builtinMetrics:     state.BuiltinMetrics,
 	}
 
@@ -254,21 +253,23 @@ func (mi *WS) Connect(url string, args ...goja.Value) (*WSHTTPResponse, error) {
 			{
 				TimeSeries: metrics.TimeSeries{
 					Metric: state.BuiltinMetrics.WSSessions,
-					Tags:   tags,
+					Tags:   tagsAndMeta.Tags,
 				},
-				Time:  start,
-				Value: 1,
+				Time:     start,
+				Metadata: tagsAndMeta.Metadata,
+				Value:    1,
 			},
 			{
 				TimeSeries: metrics.TimeSeries{
 					Metric: state.BuiltinMetrics.WSConnecting,
-					Tags:   tags,
+					Tags:   tagsAndMeta.Tags,
 				},
-				Time:  start,
-				Value: connectionDuration,
+				Time:     start,
+				Metadata: tagsAndMeta.Metadata,
+				Value:    connectionDuration,
 			},
 		},
-		Tags: tags,
+		Tags: tagsAndMeta.Tags,
 		Time: start,
 	})
 
@@ -279,7 +280,7 @@ func (mi *WS) Connect(url string, args ...goja.Value) (*WSHTTPResponse, error) {
 			return nil, connErr
 		}
 		state.Logger.WithError(connErr).Warn("Attempt to establish a WebSocket connection failed")
-		return &WSHTTPResponse{
+		return &HTTPResponse{
 			Error: connErr.Error(),
 		}, nil
 	}
@@ -329,10 +330,11 @@ func (mi *WS) Connect(url string, args ...goja.Value) (*WSHTTPResponse, error) {
 		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
 			TimeSeries: metrics.TimeSeries{
 				Metric: socket.builtinMetrics.WSSessionDuration,
-				Tags:   socket.tags,
+				Tags:   socket.tagsAndMeta.Tags,
 			},
-			Time:  start,
-			Value: sessionDuration,
+			Time:     start,
+			Metadata: socket.tagsAndMeta.Metadata,
+			Value:    sessionDuration,
 		})
 	}()
 
@@ -359,10 +361,11 @@ func (mi *WS) Connect(url string, args ...goja.Value) (*WSHTTPResponse, error) {
 			metrics.PushIfNotDone(ctx, socket.samplesOutput, metrics.Sample{
 				TimeSeries: metrics.TimeSeries{
 					Metric: socket.builtinMetrics.WSMessagesReceived,
-					Tags:   socket.tags,
+					Tags:   socket.tagsAndMeta.Tags,
 				},
-				Time:  time.Now(),
-				Value: 1,
+				Time:     time.Now(),
+				Metadata: socket.tagsAndMeta.Metadata,
+				Value:    1,
 			})
 
 			if msg.mtype == websocket.BinaryMessage {
@@ -396,6 +399,7 @@ func (mi *WS) Connect(url string, args ...goja.Value) (*WSHTTPResponse, error) {
 	}
 }
 
+// On is used to configure what the websocket should do on each event.
 func (s *Socket) On(event string, handler goja.Value) {
 	if handler, ok := goja.AssertFunction(handler); ok {
 		s.eventHandlers[event] = append(s.eventHandlers[event], handler)
@@ -421,10 +425,11 @@ func (s *Socket) Send(message string) {
 	metrics.PushIfNotDone(s.ctx, s.samplesOutput, metrics.Sample{
 		TimeSeries: metrics.TimeSeries{
 			Metric: s.builtinMetrics.WSMessagesSent,
-			Tags:   s.tags,
+			Tags:   s.tagsAndMeta.Tags,
 		},
-		Time:  time.Now(),
-		Value: 1,
+		Time:     time.Now(),
+		Metadata: s.tagsAndMeta.Metadata,
+		Value:    1,
 	})
 }
 
@@ -453,13 +458,15 @@ func (s *Socket) SendBinary(message goja.Value) {
 	metrics.PushIfNotDone(s.ctx, s.samplesOutput, metrics.Sample{
 		TimeSeries: metrics.TimeSeries{
 			Metric: s.builtinMetrics.WSMessagesSent,
-			Tags:   s.tags,
+			Tags:   s.tagsAndMeta.Tags,
 		},
-		Time:  time.Now(),
-		Value: 1,
+		Time:     time.Now(),
+		Metadata: s.tagsAndMeta.Metadata,
+		Value:    1,
 	})
 }
 
+// Ping sends a ping message over the websocket.
 func (s *Socket) Ping() {
 	deadline := time.Now().Add(writeWait)
 	pingID := strconv.Itoa(s.pingSendCounter)
@@ -488,10 +495,11 @@ func (s *Socket) trackPong(pingID string) {
 	metrics.PushIfNotDone(s.ctx, s.samplesOutput, metrics.Sample{
 		TimeSeries: metrics.TimeSeries{
 			Metric: s.builtinMetrics.WSPing,
-			Tags:   s.tags,
+			Tags:   s.tagsAndMeta.Tags,
 		},
-		Time:  pongTimestamp,
-		Value: metrics.D(pongTimestamp.Sub(pingTimestamp)),
+		Time:     pongTimestamp,
+		Metadata: s.tagsAndMeta.Metadata,
+		Value:    metrics.D(pongTimestamp.Sub(pingTimestamp)),
 	})
 }
 
@@ -558,6 +566,7 @@ func (s *Socket) SetInterval(fn goja.Callable, intervalMs float64) error {
 	return nil
 }
 
+// Close closes the webscocket. If providede the first argument will be used as the code for the close message.
 func (s *Socket) Close(args ...goja.Value) {
 	code := websocket.CloseGoingAway
 	if len(args) > 0 {
@@ -612,9 +621,12 @@ func (s *Socket) readPump(readChan chan *message, errorChan chan error, closeCha
 				}
 			}
 			code := websocket.CloseGoingAway
-			if e, ok := err.(*websocket.CloseError); ok {
+			e := new(websocket.CloseError)
+
+			if errors.As(err, &e) {
 				code = e.Code
 			}
+
 			select {
 			case closeChan <- code:
 			case <-s.done:
@@ -631,12 +643,12 @@ func (s *Socket) readPump(readChan chan *message, errorChan chan error, closeCha
 }
 
 // Wrap the raw HTTPResponse we received to a WSHTTPResponse we can pass to the user
-func wrapHTTPResponse(httpResponse *http.Response) (*WSHTTPResponse, error) {
-	wsResponse := WSHTTPResponse{
+func wrapHTTPResponse(httpResponse *http.Response) (*HTTPResponse, error) {
+	wsResponse := HTTPResponse{
 		Status: httpResponse.StatusCode,
 	}
 
-	body, err := ioutil.ReadAll(httpResponse.Body)
+	body, err := io.ReadAll(httpResponse.Body)
 	if err != nil {
 		return nil, err
 	}

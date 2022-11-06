@@ -17,7 +17,7 @@ func Throw(rt *goja.Runtime, err error) {
 	if e, ok := err.(*goja.Exception); ok { //nolint:errorlint // we don't really want to unwrap here
 		panic(e)
 	}
-	panic(rt.ToValue(err))
+	panic(rt.NewGoError(err)) // this catches the stack unlike rt.ToValue
 }
 
 // GetReader tries to return an io.Reader value from an exported goja value.
@@ -32,7 +32,7 @@ func GetReader(data interface{}) (io.Reader, error) {
 	case goja.ArrayBuffer:
 		return bytes.NewBuffer(r.Bytes()), nil
 	default:
-		return nil, fmt.Errorf("invalid type %T, it needs to be a string, byte array or an ArrayBuffer", data)
+		return nil, fmt.Errorf("invalid type %T, it needs to be a string or ArrayBuffer", data)
 	}
 }
 
