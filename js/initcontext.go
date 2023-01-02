@@ -16,6 +16,7 @@ import (
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/compiler"
 	"go.k6.io/k6/js/modules"
+	"go.k6.io/k6/js/modules/k6/data"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/fsext"
 	"go.k6.io/k6/loader"
@@ -257,7 +258,7 @@ func (i *InitContext) Open(filename string, args ...string) (goja.Value, error) 
 	}
 
 	if len(args) > 0 && strings.Contains(args[0], "b") {
-		dataModule, exists := i.modules["k6/data"]
+		dataModule, exists := i.moduleRegistry["k6/data"]
 		if !exists {
 			return nil, fmt.Errorf(
 				"an internal error occurred; " +
