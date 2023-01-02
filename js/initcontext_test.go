@@ -209,7 +209,7 @@ func TestInitContextRequire(t *testing.T) {
 
 			bi, err := b.Instantiate(logger, 0)
 			require.NoError(t, err)
-			_, err = bi.exports[consts.DefaultFn](goja.Undefined())
+			_, err = bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 			assert.NoError(t, err)
 		})
 	})
@@ -262,7 +262,7 @@ func TestInitContextOpen(t *testing.T) {
 			t.Parallel()
 			bi, err := createAndReadFile(t, tc.file, tc.content, tc.length, "")
 			require.NoError(t, err)
-			assert.Equal(t, string(tc.content), bi.pgm.exports.Get("data").Export())
+			assert.Equal(t, string(tc.content), bi.getExported("data").Export())
 		})
 	}
 
@@ -271,7 +271,7 @@ func TestInitContextOpen(t *testing.T) {
 		bi, err := createAndReadFile(t, "/path/to/file.bin", []byte("hi!\x0f\xff\x01"), 6, "b")
 		require.NoError(t, err)
 		buf := bi.Runtime.NewArrayBuffer([]byte{104, 105, 33, 15, 255, 1})
-		assert.Equal(t, buf, bi.pgm.exports.Get("data").Export())
+		assert.Equal(t, buf, bi.getExported("data").Export())
 	})
 
 	testdata := map[string]string{
@@ -388,7 +388,7 @@ func TestRequestWithBinaryFile(t *testing.T) {
 	defer cancel()
 	bi.moduleVUImpl.ctx = ctx
 
-	v, err := bi.exports[consts.DefaultFn](goja.Undefined())
+	v, err := bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 	require.NoError(t, err)
 	require.NotNil(t, v)
 	assert.Equal(t, true, v.Export())
@@ -535,7 +535,7 @@ func TestRequestWithMultipleBinaryFiles(t *testing.T) {
 	defer cancel()
 	bi.moduleVUImpl.ctx = ctx
 
-	v, err := bi.exports[consts.DefaultFn](goja.Undefined())
+	v, err := bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 	require.NoError(t, err)
 	require.NotNil(t, v)
 	assert.Equal(t, true, v.Export())
@@ -552,7 +552,7 @@ func TestInitContextVU(t *testing.T) {
 	require.NoError(t, err)
 	bi, err := b.Instantiate(testutils.NewLogger(t), 5)
 	require.NoError(t, err)
-	v, err := bi.exports[consts.DefaultFn](goja.Undefined())
+	v, err := bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 	require.NoError(t, err)
 	assert.Equal(t, int64(5), v.Export())
 }
@@ -585,7 +585,7 @@ export default function(){
 
 	bi, err := b.Instantiate(logger, 0)
 	require.NoError(t, err)
-	_, err = bi.exports[consts.DefaultFn](goja.Undefined())
+	_, err = bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 	require.Error(t, err)
 	exception := new(goja.Exception)
 	require.ErrorAs(t, err, &exception)
@@ -616,7 +616,7 @@ export default function () {
 
 	bi, err := b.Instantiate(logger, 0)
 	require.NoError(t, err)
-	_, err = bi.exports[consts.DefaultFn](goja.Undefined())
+	_, err = bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 	require.Error(t, err)
 	exception := new(goja.Exception)
 	require.ErrorAs(t, err, &exception)
@@ -648,7 +648,7 @@ export default function () {
 
 	bi, err := b.Instantiate(logger, 0)
 	require.NoError(t, err)
-	_, err = bi.exports[consts.DefaultFn](goja.Undefined())
+	_, err = bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 	require.Error(t, err)
 	exception := new(goja.Exception)
 	require.ErrorAs(t, err, &exception)
@@ -679,11 +679,42 @@ export default function () {
 
 	bi, err := b.Instantiate(logger, 0)
 	require.NoError(t, err)
-	_, err = bi.exports[consts.DefaultFn](goja.Undefined())
+	_, err = bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 	require.Error(t, err)
 	exception := new(goja.Exception)
 	require.ErrorAs(t, err, &exception)
 	// TODO figure out why those are not the same as the one in the previous test TestSourceMapsExternal
 	// likely settings in the transpilers
 	require.Equal(t, "cool is cool\n\tat webpack:///./test1.ts:2:4(2)\n\tat r (webpack:///./test1.ts:5:4(3))\n\tat file:///script.js:4:2(4)\n\tat native\n", exception.String())
+}
+
+func TestImportModificationsAreConsistentBetweenFiles(t *testing.T) {
+	t.Parallel()
+	logger := testutils.NewLogger(t)
+	fs := afero.NewMemMapFs()
+	require.NoError(t, afero.WriteFile(fs, "/notk6.js", []byte(`export default {group}; function group() {}`), 0o644))
+	require.NoError(t, afero.WriteFile(fs, "/instrument.js", []byte(`
+    import k6 from "k6";
+    k6.newKey = 5;
+    k6.group = 3;
+
+    import notk6 from "./notk6.js";
+    notk6.group = 3;
+    notk6.newKey = 5;
+    `), 0o644))
+
+	b, err := getSimpleBundle(t, "/script.js", `
+    import k6 from "k6";
+    import notk6 from "./notk6.js";
+    import "./instrument.js";
+    if (k6.newKey != 5) { throw "k6.newKey is wrong "+ k6.newKey}
+    if (k6.group != 3) { throw "k6.group is wrong "+ k6.group}
+    if (notk6.newKey != 5) { throw "notk6.newKey is wrong "+ notk6.newKey}
+    if (notk6.group != 3) { throw "notk6.group is wrong "+ notk6.group}
+    export default () => { throw "this shouldn't be ran" }
+`, fs)
+	require.NoError(t, err, "bundle error")
+
+	_, err = b.Instantiate(logger, 0)
+	require.NoError(t, err)
 }

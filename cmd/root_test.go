@@ -3,9 +3,15 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/sirupsen/logrus"
@@ -14,6 +20,49 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.k6.io/k6/lib/testutils"
 )
+
+type blockingTransport struct {
+	fallback       http.RoundTripper
+	forbiddenHosts map[string]bool
+	counter        uint32
+}
+
+func (bt *blockingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	host := req.URL.Hostname()
+	if bt.forbiddenHosts[host] {
+		atomic.AddUint32(&bt.counter, 1)
+		panic(fmt.Errorf("trying to make forbidden request to %s during test", host))
+	}
+	return bt.fallback.RoundTrip(req)
+}
+
+func TestMain(m *testing.M) {
+	exitCode := 1 // error out by default
+	defer func() {
+		os.Exit(exitCode)
+	}()
+
+	bt := &blockingTransport{
+		fallback: http.DefaultTransport,
+		forbiddenHosts: map[string]bool{
+			"ingest.k6.io":    true,
+			"cloudlogs.k6.io": true,
+			"app.k6.io":       true,
+			"reports.k6.io":   true,
+		},
+	}
+	http.DefaultTransport = bt
+	defer func() {
+		if bt.counter > 0 {
+			fmt.Printf("Expected blocking transport count to be 0 but was %d\n", bt.counter) //nolint:forbidigo
+			exitCode = 2
+		}
+	}()
+
+	// TODO: add https://github.com/uber-go/goleak
+
+	exitCode = m.Run()
+}
 
 type globalTestState struct {
 	*globalState
@@ -25,6 +74,26 @@ type globalTestState struct {
 	cwd string
 
 	expectedExitCode int
+}
+
+var portRangeStart uint64 = 6565 //nolint:gochecknoglobals
+
+func getFreeBindAddr(t *testing.T) string {
+	for i := 0; i < 100; i++ {
+		port := atomic.AddUint64(&portRangeStart, 1)
+		addr := net.JoinHostPort("localhost", strconv.FormatUint(port, 10))
+
+		listener, err := net.Listen("tcp", addr)
+		if err != nil {
+			continue // port was busy for some reason
+		}
+		defer func() {
+			assert.NoError(t, listener.Close())
+		}()
+		return addr
+	}
+	t.Fatal("could not get a free port")
+	return ""
 }
 
 func newGlobalTestState(t *testing.T) *globalTestState {
@@ -52,25 +121,31 @@ func newGlobalTestState(t *testing.T) *globalTestState {
 		stdErr:     new(bytes.Buffer),
 	}
 
+	osExitCalled := false
 	defaultOsExitHandle := func(exitCode int) {
 		cancel()
-		require.Equal(t, ts.expectedExitCode, exitCode)
+		osExitCalled = true
+		assert.Equal(t, ts.expectedExitCode, exitCode)
 	}
+
+	t.Cleanup(func() {
+		if ts.expectedExitCode > 0 {
+			// Ensure that, if we expected to receive an error, our `os.Exit()` mock
+			// function was actually called.
+			assert.Truef(t, osExitCalled, "expected exit code %d, but the os.Exit() mock was not called", ts.expectedExitCode)
+		}
+	})
 
 	outMutex := &sync.Mutex{}
 	defaultFlags := getDefaultFlags(".config")
-
-	// Set an empty REST API address by default so that `k6 run` dosen't try to
-	// bind to it, which will result in parallel integration tests trying to use
-	// the same port and a warning message in every one.
-	defaultFlags.address = ""
+	defaultFlags.address = getFreeBindAddr(t)
 
 	ts.globalState = &globalState{
 		ctx:            ctx,
 		fs:             fs,
 		getwd:          func() (string, error) { return ts.cwd, nil },
 		args:           []string{},
-		envVars:        map[string]string{},
+		envVars:        map[string]string{"K6_NO_USAGE_REPORT": "true"},
 		defaultFlags:   defaultFlags,
 		flags:          defaultFlags,
 		outMutex:       outMutex,

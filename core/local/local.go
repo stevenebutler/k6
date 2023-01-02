@@ -179,6 +179,9 @@ func (e *ExecutionScheduler) initVUsConcurrently(
 	for i := 0; i < concurrency; i++ {
 		go func() {
 			for range limiter {
+				// TODO: actually pass the context when we initialize VUs here,
+				// so we can cancel that initialization if there is an error,
+				// see https://github.com/grafana/k6/issues/2790
 				newVU, err := e.initVU(samplesOut, logger)
 				if err == nil {
 					e.state.AddInitializedVU(newVU)
@@ -255,8 +258,14 @@ func (e *ExecutionScheduler) emitVUsAndVUsMax(ctx context.Context, out chan<- me
 
 // Init concurrently initializes all of the planned VUs and then sequentially
 // initializes all of the configured executors.
-func (e *ExecutionScheduler) Init(ctx context.Context, samplesOut chan<- metrics.SampleContainer) error {
+func (e *ExecutionScheduler) Init(ctx context.Context, samplesOut chan<- metrics.SampleContainer) (err error) {
 	e.emitVUsAndVUsMax(ctx, samplesOut)
+	defer func() {
+		if err != nil {
+			close(e.stopVUsEmission)
+			<-e.vusEmissionStopped
+		}
+	}()
 
 	logger := e.state.Test.Logger.WithField("phase", "local-execution-scheduler-init")
 	vusToInitialize := lib.GetMaxPlannedVUs(e.executionPlan)
@@ -281,6 +290,10 @@ func (e *ExecutionScheduler) Init(ctx context.Context, samplesOut chan<- metrics
 		}),
 	)
 
+	// TODO: once VU initialization accepts a context, when a VU init fails,
+	// cancel the context and actually wait for all VUs to finish before this
+	// function returns - that way we won't have any trailing logs, see
+	// https://github.com/grafana/k6/issues/2790
 	for vuNum := uint64(0); vuNum < vusToInitialize; vuNum++ {
 		select {
 		case err := <-doneInits:
@@ -369,6 +382,7 @@ func (e *ExecutionScheduler) runExecutor(
 
 // Run the ExecutionScheduler, funneling all generated metric samples through the supplied
 // out channel.
+//
 //nolint:funlen
 func (e *ExecutionScheduler) Run(globalCtx, runCtx context.Context, engineOut chan<- metrics.SampleContainer) error {
 	defer func() {
@@ -412,7 +426,6 @@ func (e *ExecutionScheduler) Run(globalCtx, runCtx context.Context, engineOut ch
 
 	// Run setup() before any executors, if it's not disabled
 	if !e.state.Test.Options.NoSetup.Bool {
-		logger.Debug("Running setup()")
 		e.state.SetExecutionStatus(lib.ExecutionStatusSetup)
 		e.initProgress.Modify(pb.WithConstProgress(1, "setup()"))
 		if err := e.state.Test.Runner.Setup(runSubCtx, engineOut); err != nil {
@@ -448,7 +461,6 @@ func (e *ExecutionScheduler) Run(globalCtx, runCtx context.Context, engineOut ch
 
 	// Run teardown() after all executors are done, if it's not disabled
 	if !e.state.Test.Options.NoTeardown.Bool {
-		logger.Debug("Running teardown()")
 		e.state.SetExecutionStatus(lib.ExecutionStatusTeardown)
 		e.initProgress.Modify(pb.WithConstProgress(1, "teardown()"))
 

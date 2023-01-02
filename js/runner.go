@@ -157,7 +157,7 @@ func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.Sampl
 		Resolver:         r.Resolver,
 		Blacklist:        r.Bundle.Options.BlacklistIPs,
 		BlockedHostnames: r.Bundle.Options.BlockedHostnames.Trie,
-		Hosts:            r.Bundle.Options.Hosts,
+		Hosts:            r.Bundle.Options.Hosts.Trie,
 	}
 	if r.Bundle.Options.LocalIPs.Valid {
 		var ipIndex uint64
@@ -274,6 +274,14 @@ func forceHTTP1() bool {
 
 // Setup runs the setup function if there is one and sets the setupData to the returned value
 func (r *Runner) Setup(ctx context.Context, out chan<- metrics.SampleContainer) error {
+	if !r.IsExecutable(consts.SetupFn) {
+		// do not init a new transient VU or execute setup() if it wasn't
+		// actually defined and exported in the script
+		r.preInitState.Logger.Debugf("%s() is not defined or not exported, skipping!", consts.SetupFn)
+		return nil
+	}
+	r.preInitState.Logger.Debugf("Running %s()...", consts.SetupFn)
+
 	setupCtx, setupCancel := context.WithTimeout(ctx, r.getTimeoutFor(consts.SetupFn))
 	defer setupCancel()
 
@@ -307,6 +315,14 @@ func (r *Runner) SetSetupData(data []byte) {
 
 // Teardown runs the teardown function if there is one.
 func (r *Runner) Teardown(ctx context.Context, out chan<- metrics.SampleContainer) error {
+	if !r.IsExecutable(consts.TeardownFn) {
+		// do not init a new transient VU or execute teardown() if it wasn't
+		// actually defined and exported in the script
+		r.preInitState.Logger.Debugf("%s() is not defined or not exported, skipping!", consts.TeardownFn)
+		return nil
+	}
+	r.preInitState.Logger.Debugf("Running %s()...", consts.TeardownFn)
+
 	teardownCtx, teardownCancel := context.WithTimeout(ctx, r.getTimeoutFor(consts.TeardownFn))
 	defer teardownCancel()
 
@@ -699,8 +715,8 @@ func (u *ActiveVU) RunOnce() error {
 		}
 	}
 
-	fn, ok := u.exports[u.Exec]
-	if !ok {
+	fn := u.getCallableExport(u.Exec)
+	if fn == nil {
 		// Shouldn't happen; this is validated in cmd.validateScenarioConfig()
 		panic(fmt.Sprintf("function '%s' not found in exports", u.Exec))
 	}
@@ -741,7 +757,7 @@ func (u *ActiveVU) RunOnce() error {
 }
 
 func (u *VU) getExported(name string) goja.Value {
-	return u.BundleInstance.pgm.module.Get("exports").ToObject(u.Runtime).Get(name)
+	return u.BundleInstance.getExported(name)
 }
 
 // if isDefault is true, cancel also needs to be provided and it should cancel the provided context
