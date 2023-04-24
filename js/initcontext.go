@@ -19,6 +19,8 @@ import (
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/fsext"
 	"go.k6.io/k6/loader"
+
+	k6_data "go.k6.io/k6/js/modules/k6/data"
 )
 
 type programWithSource struct {
@@ -259,7 +261,31 @@ func (i *InitContext) Open(filename string, args ...string) (goja.Value, error) 
 		return nil, err
 	}
 
-	if len(args) > 0 && args[0] == "b" {
+	if len(args) > 0 && strings.Contains(args[0], "b") {
+		dataModule, exists := i.moduleRegistry["k6/data"]
+		if !exists {
+			return nil, fmt.Errorf(
+				"an internal error occurred; " +
+					"reason: the data module is not loaded in the init context. " +
+					"It looks like you've found a bug, please consider " +
+					"filling an issue on Github: https://github.com/grafana/k6/issues/new/choose",
+			)
+		}
+		if strings.Contains(args[0], "r") {
+			// We ask the data module to get or create a shared array buffer entry from
+			// its internal mapping using the provided filename, and data.
+			//
+			// N.B: using mmap in read-only mode could be a better option, rather than
+			// loading all the data in memory; as it's essentially the mmap syscall's
+			// reason to be. However mmap is tricky
+			// in Go: https://valyala.medium.com/mmap-in-go-considered-harmful-d92a25cb161d
+			// Also, mmap is essentially a Unix syscall and we are not sure about the state
+			// of its integration in Windows and MacOS. As of december 2021, https://github.com/edsrzf/mmap-go
+			// would look like the best portable solution if we were to take that route.
+			sharedArrayBuffer := dataModule.(*k6_data.RootModule).GetOrCreateSharedArrayBuffer(filename, data)
+			ab := sharedArrayBuffer.Wrap(i.moduleVUImpl.runtime)
+			return i.moduleVUImpl.runtime.ToValue(&ab), nil
+		}
 		ab := i.moduleVUImpl.runtime.NewArrayBuffer(data)
 		return i.moduleVUImpl.runtime.ToValue(&ab), nil
 	}
