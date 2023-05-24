@@ -377,7 +377,7 @@ func (b *Bundle) setInitGlobals(rt *goja.Runtime, modSys *moduleSystem) (unset f
 			return nil, errors.New("open() can't be used with an empty filename")
 		}
 		// This uses the pwd from the requireImpl
-		return openImpl(rt, b.filesystems["file"], r.pwd, filename, args...)
+		return openImpl(rt, b.moduleResolver, b.filesystems["file"], r.pwd, filename, args...)
 	})
 	return func() {
 		mustSet("require", goja.Undefined())

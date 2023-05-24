@@ -2626,7 +2626,7 @@ func (rl *clientConnReadLoop) processData(f *DataFrame) error {
 		return nil
 	}
 	if cs.readClosed {
-		cc.logf("protocol error: received DATA after END_STREAM")
+		//cc.logf("protocol error: received DATA after END_STREAM")
 		rl.endStreamError(cs, StreamError{
 			StreamID: f.StreamID,
 			Code:     ErrCodeProtocol,

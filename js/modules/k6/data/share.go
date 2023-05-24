@@ -92,3 +92,13 @@ func (s wrappedSharedArray) deepFreeze(rt *goja.Runtime, val goja.Value) error {
 	}
 	return nil
 }
+
+// SharedArrayBuffer holds the bytes of a shared array buffer.
+type SharedArrayBuffer struct {
+	arr []byte
+}
+
+// Wrap a SharedArray buffer with a provided JS runtime
+func (sab SharedArrayBuffer) Wrap(runtime *goja.Runtime) goja.ArrayBuffer {
+	return runtime.NewArrayBuffer(sab.arr)
+}
