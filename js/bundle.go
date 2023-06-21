@@ -408,7 +408,7 @@ func (b *Bundle) setInitGlobals(rt *goja.Runtime, vu *moduleVUImpl, modSys *modu
 		}
 		// This uses the pwd from the requireImpl
 		pwd := impl.internal.CurrentlyRequiredModule()
-		return openImpl(rt, b.filesystems["file"], &pwd, filename, args...)
+		return openImpl(rt, b.ModuleResolver, b.filesystems["file"], &pwd, filename, args...)
 	})
 
 	return func() {

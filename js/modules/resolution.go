@@ -164,3 +164,8 @@ func (ms *ModuleSystem) RunSourceData(source *loader.SourceData) (goja.Value, er
 	}
 	return ms.Require(pwd, specifier)
 }
+
+func (mr *ModuleResolver) GetGoModule(name string) (interface{}, bool) {
+	mod, ok := mr.goModules[name]
+	return mod, ok
+}

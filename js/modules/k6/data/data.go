@@ -16,17 +16,23 @@ type (
 	// RootModule is the global module instance that will create module
 	// instances for each VU.
 	RootModule struct {
-		shared sharedArrays
+		shared    sharedArrays
+		immutable sharedArrayBuffers
 	}
 
 	// Data represents an instance of the data module.
 	Data struct {
-		vu     modules.VU
-		shared *sharedArrays
+		vu        modules.VU
+		shared    *sharedArrays
+		immutable *sharedArrayBuffers
 	}
 
 	sharedArrays struct {
 		data map[string]sharedArray
+		mu   sync.RWMutex
+	}
+	sharedArrayBuffers struct {
+		data map[string]SharedArrayBuffer
 		mu   sync.RWMutex
 	}
 )
@@ -42,6 +48,9 @@ func New() *RootModule {
 		shared: sharedArrays{
 			data: make(map[string]sharedArray),
 		},
+		immutable: sharedArrayBuffers{
+			data: make(map[string]SharedArrayBuffer),
+		},
 	}
 }
 
@@ -49,9 +58,47 @@ func New() *RootModule {
 // a new instance for each VU.
 func (rm *RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 	return &Data{
-		vu:     vu,
-		shared: &rm.shared,
+		vu:        vu,
+		shared:    &rm.shared,
+		immutable: &rm.immutable,
 	}
+}
+
+// GetOrCreateSharedArrayBuffer fetches a shared array buffer instance with
+// the provided name from the module, if it does not exist yet, it is created
+// from the provided data.
+//
+// This method is for instance used by the init context's open method, when the
+// `b` and `r` options are supplied, in order to ensure we read a binary file
+// from disk only once, but allow repetitive access to its underlying data.
+func (rm *RootModule) GetOrCreateSharedArrayBuffer(filename string, data []byte) SharedArrayBuffer {
+	return rm.immutable.get(filename, data)
+}
+
+func (i *sharedArrayBuffers) get(filename string, data []byte) SharedArrayBuffer {
+	i.mu.RLock()
+	array, exists := i.data[filename]
+	i.mu.RUnlock()
+	if !exists {
+		// If the array was not found, we need to try and
+		// create it. Thus, we acquire a read/write lock,
+		// which will be released at the end of this if
+		// statement's scope.
+		i.mu.Lock()
+		defer i.mu.Unlock()
+
+		// To ensure atomicity of our operation, and as we have
+		// reacquired a lock on the data, we should double check
+		// the pre-existence of the array (it might have been created
+		// in the meantime).
+		array, exists = i.data[filename]
+		if !exists {
+			array = SharedArrayBuffer{arr: data}
+			i.data[filename] = array
+		}
+	}
+
+	return array
 }
 
 // Exports returns the exports of the data module.
@@ -132,4 +179,14 @@ func getShareArrayFromCall(rt *goja.Runtime, call goja.Callable) sharedArray {
 	}
 
 	return sharedArray{arr: arr}
+}
+
+// SharedArrayBuffer holds the bytes of a shared array buffer.
+type SharedArrayBuffer struct {
+	arr []byte
+}
+
+// Wrap a SharedArray buffer with a provided JS runtime
+func (sab SharedArrayBuffer) Wrap(runtime *goja.Runtime) goja.ArrayBuffer {
+	return runtime.NewArrayBuffer(sab.arr)
 }
