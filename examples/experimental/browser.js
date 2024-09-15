@@ -1,18 +1,25 @@
 import { check } from 'k6';
-import { chromium } from 'k6/experimental/browser';
+import { browser } from 'k6/browser';
 
 export const options = {
+  scenarios: {
+    ui: {
+      executor: 'shared-iterations',
+      options: {
+        browser: {
+            type: 'chromium',
+        },
+      },
+    },
+  },
   thresholds: {
     checks: ["rate==1.0"]
   }
 }
 
 export default async function() {
-  const browser = chromium.launch({
-    headless: __ENV.XK6_HEADLESS ? true : false,
-  });
-  const context = browser.newContext();
-  const page = context.newPage();
+  const context = await browser.newContext();
+  const page = await context.newPage();
 
   try {
     // Goto front page, find login link and click it
@@ -22,8 +29,8 @@ export default async function() {
       page.locator('a[href="/my_messages.php"]').click(),
     ]);
     // Enter login credentials and login
-    page.locator('input[name="login"]').type('admin');
-    page.locator('input[name="password"]').type('123');
+    await page.locator('input[name="login"]').type("admin");
+    await page.locator('input[name="password"]').type("123");
     // We expect the form submission to trigger a navigation, so to prevent a
     // race condition, setup a waiter concurrently while waiting for the click
     // to resolve.
@@ -31,11 +38,11 @@ export default async function() {
       page.waitForNavigation(),
       page.locator('input[type="submit"]').click(),
     ]);
-    check(page, {
-      'header': page.locator('h2').textContent() == 'Welcome, admin!',
+    const content = await page.locator("h2").textContent();
+    check(content, {
+      'header': content => content == 'Welcome, admin!',
     });
   } finally {
-    page.close();
-    browser.close();
+    await page.close();
   }
 }

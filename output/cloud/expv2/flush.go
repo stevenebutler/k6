@@ -1,28 +1,33 @@
 package expv2
 
 import (
-	"context"
+	"time"
+
+	"github.com/sirupsen/logrus"
 
 	"go.k6.io/k6/metrics"
 	"go.k6.io/k6/output/cloud/expv2/pbcloud"
 )
 
 type pusher interface {
-	push(referenceID string, samples *pbcloud.MetricSet) error
+	push(samples *pbcloud.MetricSet) error
 }
 
 type metricsFlusher struct {
-	referenceID                string
+	testRunID                  string
 	bq                         *bucketQ
 	client                     pusher
+	logger                     logrus.FieldLogger
+	discardedLabels            map[string]struct{}
 	aggregationPeriodInSeconds uint32
-	maxSeriesInSingleBatch     int
+	maxSeriesInBatch           int
+	batchPushConcurrency       int
 }
 
 // flush flushes the queued buckets sending them to the remote Cloud service.
 // If the number of time series collected is bigger than maximum batch size
 // then it splits in chunks.
-func (f *metricsFlusher) flush(_ context.Context) error {
+func (f *metricsFlusher) flush() error {
 	// drain the buffer
 	buckets := f.bq.PopAll()
 	if len(buckets) < 1 {
@@ -38,33 +43,103 @@ func (f *metricsFlusher) flush(_ context.Context) error {
 	// and group them by metric. To avoid doing too many loops and allocations,
 	// the metricSetBuilder is used for doing it during the traverse of the buckets.
 
-	msb := newMetricSetBuilder(f.referenceID, f.aggregationPeriodInSeconds)
+	var (
+		start       = time.Now()
+		batches     []*pbcloud.MetricSet
+		seriesCount int
+	)
+
+	defer func() {
+		f.logger.
+			WithField("t", time.Since(start)).
+			WithField("series", seriesCount).
+			WithField("buckets", len(buckets)).
+			WithField("batches", len(batches)).Debug("Flush the queued buckets")
+	}()
+
+	msb := newMetricSetBuilder(f.testRunID, f.aggregationPeriodInSeconds)
 	for i := 0; i < len(buckets); i++ {
-		msb.addTimeBucket(buckets[i])
-		if len(msb.seriesIndex) < f.maxSeriesInSingleBatch {
-			continue
-		}
+		for timeSeries, sink := range buckets[i].Sinks {
+			msb.addTimeSeries(buckets[i].Time, timeSeries, sink)
+			if len(msb.seriesIndex) < f.maxSeriesInBatch {
+				continue
+			}
 
-		// we hit the chunk size, let's flush
-		err := f.client.push(f.referenceID, msb.MetricSet)
-		if err != nil {
-			return err
-		}
-		msb = newMetricSetBuilder(f.referenceID, f.aggregationPeriodInSeconds)
-	}
+			// We hit the batch size, let's flush
+			seriesCount += len(msb.seriesIndex)
+			batches = append(batches, msb.MetricSet)
+			f.reportDiscardedLabels(msb.discardedLabels)
 
-	if len(msb.seriesIndex) < 1 {
-		return nil
+			// Reset the builder
+			msb = newMetricSetBuilder(f.testRunID, f.aggregationPeriodInSeconds)
+		}
 	}
 
 	// send the last (or the unique) MetricSet chunk to the remote service
-	return f.client.push(f.referenceID, msb.MetricSet)
+	if len(msb.seriesIndex) != 0 {
+		seriesCount += len(msb.seriesIndex)
+		batches = append(batches, msb.MetricSet)
+		f.reportDiscardedLabels(msb.discardedLabels)
+	}
+
+	return f.flushBatches(batches)
+}
+
+func (f *metricsFlusher) flushBatches(batches []*pbcloud.MetricSet) error {
+	var (
+		workers  = min(len(batches), f.batchPushConcurrency)
+		errs     = make(chan error, workers)
+		feed     = make(chan *pbcloud.MetricSet)
+		finalErr error
+	)
+
+	for i := 0; i < workers; i++ {
+		go func() {
+			for chunk := range feed {
+				if err := f.client.push(chunk); err != nil {
+					errs <- err
+					return
+				}
+			}
+			errs <- nil
+		}()
+	}
+
+outer:
+	for i := 0; i < len(batches); i++ {
+		select {
+		case err := <-errs:
+			workers--
+			finalErr = err
+			break outer
+		case feed <- batches[i]:
+		}
+	}
+
+	close(feed)
+
+	for ; workers != 0; workers-- {
+		err := <-errs
+		if err != nil && finalErr == nil {
+			finalErr = err
+		}
+	}
+	return finalErr
+}
+
+func (f *metricsFlusher) reportDiscardedLabels(discardedLabels map[string]struct{}) {
+	for key := range discardedLabels {
+		if _, ok := f.discardedLabels[key]; ok {
+			continue
+		}
+
+		f.discardedLabels[key] = struct{}{}
+		f.logger.Warnf("Tag %s has been discarded since it is reserved for Cloud operations.", key)
+	}
 }
 
 type metricSetBuilder struct {
-	MetricSet                  *pbcloud.MetricSet
-	TestRunID                  string
-	AggregationPeriodInSeconds uint32
+	MetricSet *pbcloud.MetricSet
 
 	// TODO: If we will introduce the metricID then we could
 	// just use it as map's key (map[uint64]pbcloud.Metric). It is faster.
@@ -88,46 +163,67 @@ type metricSetBuilder struct {
 	// It supports the iterative process for appending
 	// the aggregated measurements for each time series.
 	seriesIndex map[metrics.TimeSeries]uint
+
+	// discardedLabels tracks the labels that have been discarded
+	// since they are reserved for internal usage by the Cloud service.
+	discardedLabels map[string]struct{}
 }
 
 func newMetricSetBuilder(testRunID string, aggrPeriodSec uint32) metricSetBuilder {
-	return metricSetBuilder{
-		TestRunID:                  testRunID,
-		MetricSet:                  &pbcloud.MetricSet{},
-		AggregationPeriodInSeconds: aggrPeriodSec,
+	builder := metricSetBuilder{
+		MetricSet: &pbcloud.MetricSet{},
 		// TODO: evaluate if removing the pointer from pbcloud.Metric
 		// is a better trade-off
-		metrics:     make(map[*metrics.Metric]*pbcloud.Metric),
-		seriesIndex: make(map[metrics.TimeSeries]uint),
+		metrics:         make(map[*metrics.Metric]*pbcloud.Metric),
+		seriesIndex:     make(map[metrics.TimeSeries]uint),
+		discardedLabels: nil,
 	}
+	builder.MetricSet.TestRunId = testRunID
+	builder.MetricSet.AggregationPeriod = aggrPeriodSec
+	return builder
 }
 
-func (msb *metricSetBuilder) addTimeBucket(bucket timeBucket) {
-	for timeSeries, sink := range bucket.Sinks {
-		pbmetric, ok := msb.metrics[timeSeries.Metric]
-		if !ok {
-			pbmetric = &pbcloud.Metric{
-				Name: timeSeries.Metric.Name,
-				Type: mapMetricTypeProto(timeSeries.Metric.Type),
-			}
-			msb.metrics[timeSeries.Metric] = pbmetric
-			msb.MetricSet.Metrics = append(msb.MetricSet.Metrics, pbmetric)
+func (msb *metricSetBuilder) addTimeSeries(timestamp int64, timeSeries metrics.TimeSeries, sink metricValue) {
+	pbmetric, ok := msb.metrics[timeSeries.Metric]
+	if !ok {
+		pbmetric = &pbcloud.Metric{
+			Name: timeSeries.Metric.Name,
+			Type: mapMetricTypeProto(timeSeries.Metric.Type),
+		}
+		msb.metrics[timeSeries.Metric] = pbmetric
+		msb.MetricSet.Metrics = append(msb.MetricSet.Metrics, pbmetric)
+	}
+
+	var pbTimeSeries *pbcloud.TimeSeries
+	if ix, ok := msb.seriesIndex[timeSeries]; !ok {
+		labels, discardedLabels := mapTimeSeriesLabelsProto(timeSeries.Tags)
+		msb.recordDiscardedLabels(discardedLabels)
+
+		pbTimeSeries = &pbcloud.TimeSeries{
+			Labels: labels,
+		}
+		pbmetric.TimeSeries = append(pbmetric.TimeSeries, pbTimeSeries)
+		msb.seriesIndex[timeSeries] = uint(len(pbmetric.TimeSeries) - 1)
+	} else {
+		pbTimeSeries = pbmetric.TimeSeries[ix]
+	}
+	addBucketToTimeSeriesProto(pbTimeSeries, timeSeries.Metric.Type, timestamp, sink)
+}
+
+func (msb *metricSetBuilder) recordDiscardedLabels(labels []string) {
+	if len(labels) == 0 {
+		return
+	}
+
+	if msb.discardedLabels == nil {
+		msb.discardedLabels = make(map[string]struct{})
+	}
+
+	for _, key := range labels {
+		if _, ok := msb.discardedLabels[key]; ok {
+			continue
 		}
 
-		var pbTimeSeries *pbcloud.TimeSeries
-		ix, ok := msb.seriesIndex[timeSeries]
-		if !ok {
-			pbTimeSeries = &pbcloud.TimeSeries{
-				AggregationPeriod: msb.AggregationPeriodInSeconds,
-				Labels:            mapTimeSeriesLabelsProto(timeSeries, msb.TestRunID),
-			}
-			pbmetric.TimeSeries = append(pbmetric.TimeSeries, pbTimeSeries)
-			msb.seriesIndex[timeSeries] = uint(len(pbmetric.TimeSeries) - 1)
-		} else {
-			pbTimeSeries = pbmetric.TimeSeries[ix]
-		}
-
-		addBucketToTimeSeriesProto(
-			pbTimeSeries, timeSeries.Metric.Type, bucket.Time, sink)
+		msb.discardedLabels[key] = struct{}{}
 	}
 }

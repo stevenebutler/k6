@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"sync"
 
-	"github.com/grafana/xk6-browser/api"
 	"github.com/grafana/xk6-browser/k6ext"
 	"github.com/grafana/xk6-browser/log"
 
@@ -19,10 +18,12 @@ import (
 	"github.com/chromedp/cdproto/dom"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/cdproto/target"
-	"github.com/dop251/goja"
 )
 
 const evaluationScriptURL = "__xk6_browser_evaluation_script__"
+
+// This error code originates from chromium.
+const devToolsServerErrorCode = -32000
 
 var sourceURLRegex = regexp.MustCompile(`^(?s)[\040\t]*//[@#] sourceURL=\s*(\S*?)\s*$`)
 
@@ -53,7 +54,7 @@ type ExecutionContext struct {
 	frame          *Frame
 	id             runtime.ExecutionContextID
 	isMutex        sync.RWMutex
-	injectedScript api.JSHandle
+	injectedScript JSHandleAPI
 	vu             k6modules.VU
 
 	// Used for logging
@@ -112,7 +113,7 @@ func (e *ExecutionContext) adoptBackendNodeID(backendNodeID cdp.BackendNodeID) (
 		return nil, fmt.Errorf("resolving DOM node: %w", err)
 	}
 
-	return NewJSHandle(e.ctx, e.session, e, e.frame, remoteObj, e.logger).AsElement().(*ElementHandle), nil
+	return NewJSHandle(e.ctx, e.session, e, e.frame, remoteObj, e.logger).AsElement(), nil
 }
 
 // Adopts the specified element handle into this execution context from another execution context.
@@ -156,6 +157,9 @@ func (e *ExecutionContext) adoptElementHandle(eh *ElementHandle) (*ElementHandle
 func (e *ExecutionContext) eval(
 	apiCtx context.Context, opts evalOptions, js string, args ...any,
 ) (any, error) {
+	if escapesSobekValues(args...) {
+		return nil, errors.New("sobek.Value escaped")
+	}
 	e.logger.Debugf(
 		"ExecutionContext:eval",
 		"sid:%s stid:%s fid:%s ectxid:%d furl:%q %s",
@@ -205,9 +209,13 @@ func (e *ExecutionContext) eval(
 	)
 	if remoteObject, exceptionDetails, err = action.Do(cdp.WithExecutor(apiCtx, e.session)); err != nil {
 		var cdpe *cdproto.Error
-		if errors.As(err, &cdpe) && cdpe.Code == -32000 {
-			err = errors.New("execution context changed; most likely because of a navigation")
+		if errors.As(err, &cdpe) && cdpe.Code == devToolsServerErrorCode {
+			// By creating a new error instead of reusing it, we're removing the
+			// chromium specific error code.
+			return nil, errors.New(cdpe.Message)
 		}
+
+		e.logger.Warnf("ExecutionContext:eval", "Unexpected DevTools server error: %v", err)
 		return nil, err
 	}
 	if exceptionDetails != nil {
@@ -243,7 +251,7 @@ func (e *ExecutionContext) eval(
 var injectedScriptSource string
 
 // getInjectedScript returns a JS handle to the injected script of helper functions.
-func (e *ExecutionContext) getInjectedScript(apiCtx context.Context) (api.JSHandle, error) {
+func (e *ExecutionContext) getInjectedScript(apiCtx context.Context) (JSHandleAPI, error) {
 	e.logger.Debugf(
 		"ExecutionContext:getInjectedScript",
 		"sid:%s stid:%s fid:%s ectxid:%d efurl:%s",
@@ -277,7 +285,7 @@ func (e *ExecutionContext) getInjectedScript(apiCtx context.Context) (api.JSHand
 	if handle == nil {
 		return nil, errors.New("handle is nil")
 	}
-	injectedScript, ok := handle.(api.JSHandle)
+	injectedScript, ok := handle.(JSHandleAPI)
 	if !ok {
 		return nil, ErrJSHandleInvalid
 	}
@@ -290,34 +298,37 @@ func (e *ExecutionContext) getInjectedScript(apiCtx context.Context) (api.JSHand
 
 // Eval evaluates the provided JavaScript within this execution context and
 // returns a value or handle.
-func (e *ExecutionContext) Eval(
-	apiCtx context.Context, js goja.Value, args ...goja.Value,
-) (any, error) {
+func (e *ExecutionContext) Eval(apiCtx context.Context, js string, args ...any) (any, error) {
+	if escapesSobekValues(args...) {
+		return nil, errors.New("sobek.Value escaped")
+	}
 	opts := evalOptions{
 		forceCallable: true,
 		returnByValue: true,
 	}
 	evalArgs := make([]any, 0, len(args))
 	for _, a := range args {
-		evalArgs = append(evalArgs, a.Export())
+		evalArgs = append(evalArgs, a)
 	}
-	return e.eval(apiCtx, opts, js.ToString().String(), evalArgs...)
+
+	return e.eval(apiCtx, opts, js, evalArgs...)
 }
 
 // EvalHandle evaluates the provided JavaScript within this execution context
 // and returns a JSHandle.
-func (e *ExecutionContext) EvalHandle(
-	apiCtx context.Context, js goja.Value, args ...goja.Value,
-) (api.JSHandle, error) {
+func (e *ExecutionContext) EvalHandle(apiCtx context.Context, js string, args ...any) (JSHandleAPI, error) {
+	if escapesSobekValues(args...) {
+		return nil, errors.New("sobek.Value escaped")
+	}
 	opts := evalOptions{
 		forceCallable: true,
 		returnByValue: false,
 	}
 	evalArgs := make([]any, 0, len(args))
 	for _, a := range args {
-		evalArgs = append(evalArgs, a.Export())
+		evalArgs = append(evalArgs, a)
 	}
-	res, err := e.eval(apiCtx, opts, js.ToString().String(), evalArgs...)
+	res, err := e.eval(apiCtx, opts, js, evalArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -325,7 +336,12 @@ func (e *ExecutionContext) EvalHandle(
 		return nil, errors.New("nil result")
 	}
 
-	return res.(api.JSHandle), nil
+	r, ok := res.(JSHandleAPI)
+	if !ok {
+		return nil, ErrJSHandleInvalid
+	}
+
+	return r, nil
 }
 
 // Frame returns the frame that this execution context belongs to.

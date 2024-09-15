@@ -2,24 +2,37 @@ package common
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
-	"github.com/grafana/xk6-browser/api"
-	"github.com/grafana/xk6-browser/k6ext"
 	"github.com/grafana/xk6-browser/log"
 
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/runtime"
-	"github.com/dop251/goja"
+	cdpruntime "github.com/chromedp/cdproto/runtime"
 )
 
+// JSHandleAPI is the interface of an in-page JS object.
+//
+// TODO: Find a way to move this to a concrete type. It's too difficult to
+// do that right now because of the tests and the way we're using the
+// JSHandleAPI interface.
+type JSHandleAPI interface {
+	AsElement() *ElementHandle
+	Dispose() error
+	Evaluate(pageFunc string, args ...any) (any, error)
+	EvaluateHandle(pageFunc string, args ...any) (JSHandleAPI, error)
+	GetProperties() (map[string]JSHandleAPI, error)
+	JSONValue() (string, error)
+	ObjectID() cdpruntime.RemoteObjectID
+}
+
 type jsHandle interface {
-	api.JSHandle
+	JSHandleAPI
 	dispose() error
 	getProperties() (map[string]jsHandle, error)
 }
-
-var _ jsHandle = &BaseJSHandle{}
 
 // BaseJSHandle represents a JS object in an execution context.
 type BaseJSHandle struct {
@@ -60,18 +73,38 @@ func NewJSHandle(
 }
 
 // AsElement returns an element handle if this JSHandle is a reference to a JS HTML element.
-func (h *BaseJSHandle) AsElement() api.ElementHandle {
+func (h *BaseJSHandle) AsElement() *ElementHandle {
 	return nil
 }
 
 // Dispose releases the remote object.
-func (h *BaseJSHandle) Dispose() {
-	if err := h.dispose(); err != nil {
-		k6ext.Panic(h.ctx, "dispose: %w", err)
+func (h *BaseJSHandle) Dispose() error {
+	err := h.dispose()
+	if err == nil { // no error
+		return nil
 	}
+
+	// We do not want to return an error when the error is a closed
+	// context. The reason the context would be closed is due to the
+	// iteration ending and therefore the associated browser and its assets
+	// will be automatically deleted.
+	if errors.Is(err, context.Canceled) {
+		h.logger.Debugf("BaseJSHandle:Dispose", "%v", err)
+		return nil
+	}
+	// The following error indicates that the object we're trying to release
+	// cannot be found, which would mean that the object has already been
+	// removed/deleted. This can occur when a navigation occurs, usually when
+	// a page contains an iframe.
+	if strings.Contains(err.Error(), "Cannot find context with specified id") {
+		h.logger.Debugf("BaseJSHandle:Dispose", "%v", err)
+		return nil
+	}
+
+	return fmt.Errorf("disposing element with ID %s: %w", h.remoteObject.ObjectID, err)
 }
 
-// dispose is like Dispose, but does not panic.
+// dispose sends a command to the browser to release the remote object.
 func (h *BaseJSHandle) dispose() error {
 	if h.disposed {
 		return nil
@@ -90,21 +123,19 @@ func (h *BaseJSHandle) dispose() error {
 }
 
 // Evaluate will evaluate provided page function within an execution context.
-func (h *BaseJSHandle) Evaluate(pageFunc goja.Value, args ...goja.Value) any {
-	rt := h.execCtx.vu.Runtime()
-	args = append([]goja.Value{rt.ToValue(h)}, args...)
+func (h *BaseJSHandle) Evaluate(pageFunc string, args ...any) (any, error) {
+	args = append([]any{h}, args...)
 	res, err := h.execCtx.Eval(h.ctx, pageFunc, args...)
 	if err != nil {
-		k6ext.Panic(h.ctx, "%w", err)
+		return nil, fmt.Errorf("evaluating element: %w", err)
 	}
-	return res
+
+	return res, nil
 }
 
 // EvaluateHandle will evaluate provided page function within an execution context.
-func (h *BaseJSHandle) EvaluateHandle(pageFunc goja.Value, args ...goja.Value) (api.JSHandle, error) {
-	rt := h.execCtx.vu.Runtime()
-	args = append([]goja.Value{rt.ToValue(h)}, args...)
-
+func (h *BaseJSHandle) EvaluateHandle(pageFunc string, args ...any) (JSHandleAPI, error) {
+	args = append([]any{h}, args...)
 	eh, err := h.execCtx.EvalHandle(h.ctx, pageFunc, args...)
 	if err != nil {
 		return nil, fmt.Errorf("evaluating handle for element: %w", err)
@@ -114,13 +145,13 @@ func (h *BaseJSHandle) EvaluateHandle(pageFunc goja.Value, args ...goja.Value) (
 }
 
 // GetProperties retreives the JS handle's properties.
-func (h *BaseJSHandle) GetProperties() (map[string]api.JSHandle, error) {
+func (h *BaseJSHandle) GetProperties() (map[string]JSHandleAPI, error) {
 	handles, err := h.getProperties()
 	if err != nil {
 		return nil, err
 	}
 
-	jsHandles := make(map[string]api.JSHandle, len(handles))
+	jsHandles := make(map[string]JSHandleAPI, len(handles))
 	for k, v := range handles {
 		jsHandles[k] = v
 	}
@@ -148,34 +179,26 @@ func (h *BaseJSHandle) getProperties() (map[string]jsHandle, error) {
 	return props, nil
 }
 
-// GetProperty retreves a single property of the JS handle.
-func (h *BaseJSHandle) GetProperty(propertyName string) api.JSHandle {
-	return nil
-}
-
 // JSONValue returns a JSON version of this JS handle.
-func (h *BaseJSHandle) JSONValue() goja.Value {
-	if h.remoteObject.ObjectID != "" {
-		var result *runtime.RemoteObject
+func (h *BaseJSHandle) JSONValue() (string, error) {
+	remoteObject := h.remoteObject
+	if remoteObject.ObjectID != "" {
 		var err error
 		action := runtime.CallFunctionOn("function() { return this; }").
 			WithReturnByValue(true).
 			WithAwaitPromise(true).
 			WithObjectID(h.remoteObject.ObjectID)
-		if result, _, err = action.Do(cdp.WithExecutor(h.ctx, h.session)); err != nil {
-			k6ext.Panic(h.ctx, "getting properties for JS handle: %w", err)
+		if remoteObject, _, err = action.Do(cdp.WithExecutor(h.ctx, h.session)); err != nil {
+			return "", fmt.Errorf("retrieving json value: %w", err)
 		}
-		res, err := valueFromRemoteObject(h.ctx, result)
-		if err != nil {
-			k6ext.Panic(h.ctx, "extracting value from remote object: %w", err)
-		}
-		return res
 	}
-	res, err := valueFromRemoteObject(h.ctx, h.remoteObject)
+
+	res, err := parseConsoleRemoteObject(h.logger, remoteObject)
 	if err != nil {
-		k6ext.Panic(h.ctx, "extracting value from remote object: %w", err)
+		return "", fmt.Errorf("extracting json value (remote object id: %v): %w", remoteObject.ObjectID, err)
 	}
-	return res
+
+	return res, nil
 }
 
 // ObjectID returns the remote object ID.

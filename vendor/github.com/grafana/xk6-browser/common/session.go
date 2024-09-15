@@ -3,7 +3,6 @@ package common
 import (
 	"context"
 	"errors"
-	"sync/atomic"
 
 	"github.com/chromedp/cdproto"
 	"github.com/chromedp/cdproto/cdp"
@@ -13,10 +12,6 @@ import (
 	"github.com/grafana/xk6-browser/log"
 )
 
-// Ensure Session implements the EventEmitter and Executor interfaces.
-var _ EventEmitter = &Session{}
-var _ cdp.Executor = &Session{}
-
 // Session represents a CDP session to a target.
 type Session struct {
 	BaseEventEmitter
@@ -24,7 +19,7 @@ type Session struct {
 	conn     *Connection
 	id       target.SessionID
 	targetID target.ID
-	msgID    int64
+	msgIDGen msgIDGenerator
 	readCh   chan *cdproto.Message
 	done     chan struct{}
 	closed   bool
@@ -35,7 +30,7 @@ type Session struct {
 
 // NewSession creates a new session.
 func NewSession(
-	ctx context.Context, conn *Connection, id target.SessionID, tid target.ID, logger *log.Logger,
+	ctx context.Context, conn *Connection, id target.SessionID, tid target.ID, logger *log.Logger, msgIDGen msgIDGenerator,
 ) *Session {
 	s := Session{
 		BaseEventEmitter: NewBaseEventEmitter(ctx),
@@ -44,6 +39,7 @@ func NewSession(
 		targetID:         tid,
 		readCh:           make(chan *cdproto.Message),
 		done:             make(chan struct{}),
+		msgIDGen:         msgIDGen,
 
 		logger: logger,
 	}
@@ -118,7 +114,7 @@ func (s *Session) Execute(ctx context.Context, method string, params easyjson.Ma
 		return ErrTargetCrashed
 	}
 
-	id := atomic.AddInt64(&s.msgID, 1)
+	id := s.msgIDGen.newID()
 
 	// Setup event handler used to block for response to message being sent.
 	ch := make(chan *cdproto.Message, 1)
@@ -186,7 +182,7 @@ func (s *Session) ExecuteWithoutExpectationOnReply(ctx context.Context, method s
 		}
 	}
 	msg := &cdproto.Message{
-		ID: atomic.AddInt64(&s.msgID, 1),
+		ID: s.msgIDGen.newID(),
 		// We use different sessions to send messages to "targets"
 		// (browser, page, frame etc.) in CDP.
 		//

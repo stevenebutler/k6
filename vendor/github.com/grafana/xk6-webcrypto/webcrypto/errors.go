@@ -1,13 +1,9 @@
 package webcrypto
 
-import (
-	"fmt"
-)
-
 // ErrorName is a type alias for the name of a WebCryptoError.
 //
 // Note that it is a type alias, and not a binding, so that it is
-// not interpreted as an object by goja.
+// not interpreted as an object by sobek.
 type ErrorName = string
 
 const (
@@ -44,25 +40,21 @@ const (
 // Error represents a custom error emitted by the
 // Web Crypto API.
 type Error struct {
-	// Code is one of the legacy error code constants, or 0 if none match.
-	Code int `json:"code"`
-
 	// Name contains one of the strings associated with an error name.
-	Name string `json:"name"`
+	Name string `js:"name"`
 
 	// Message represents message or description associated with the given error name.
-	Message string `json:"message"`
+	Message string `js:"message"`
 }
 
 // Error implements the `error` interface, so WebCryptoError are normal Go errors.
 func (e *Error) Error() string {
-	return fmt.Sprintf(e.Name)
+	return e.Name + ": " + e.Message
 }
 
 // NewError returns a new WebCryptoError with the given name and message.
-func NewError(code int, name, message string) *Error {
+func NewError(name, message string) *Error {
 	return &Error{
-		Code:    code,
 		Name:    name,
 		Message: message,
 	}

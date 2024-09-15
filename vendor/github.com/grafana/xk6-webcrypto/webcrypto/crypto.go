@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/dop251/goja"
 	"github.com/google/uuid"
+	"github.com/grafana/sobek"
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modules"
 )
@@ -15,8 +15,8 @@ import (
 type Crypto struct {
 	vu modules.VU
 
-	Subtle    *SubtleCrypto `json:"subtle"`
-	CryptoKey *CryptoKey    `json:"CryptoKey"`
+	Subtle    *SubtleCrypto `js:"subtle"`
+	CryptoKey *CryptoKey    `js:"CryptoKey"`
 }
 
 // GetRandomValues lets you get cryptographically strong random values.
@@ -35,7 +35,7 @@ type Crypto struct {
 // generator.
 //
 // [specification]: https://www.w3.org/TR/WebCryptoAPI/#Crypto-method-getRandomValues
-func (c *Crypto) GetRandomValues(typedArray goja.Value) goja.Value {
+func (c *Crypto) GetRandomValues(typedArray sobek.Value) sobek.Value {
 	acceptedTypes := []JSType{
 		Int8ArrayConstructor,
 		Uint8ArrayConstructor,
@@ -48,7 +48,7 @@ func (c *Crypto) GetRandomValues(typedArray goja.Value) goja.Value {
 
 	// 1.
 	if !IsInstanceOf(c.vu.Runtime(), typedArray, acceptedTypes...) {
-		common.Throw(c.vu.Runtime(), NewError(0, TypeMismatchError, "typedArray parameter isn't a TypedArray instance"))
+		common.Throw(c.vu.Runtime(), NewError(TypeMismatchError, "typedArray parameter isn't a TypedArray instance"))
 	}
 
 	// 2.
@@ -58,16 +58,13 @@ func (c *Crypto) GetRandomValues(typedArray goja.Value) goja.Value {
 	obj := typedArray.ToObject(c.vu.Runtime())
 	objLength, ok := obj.Get("length").ToNumber().Export().(int64)
 	if !ok {
-		common.Throw(c.vu.Runtime(), NewError(0, TypeMismatchError, "typedArray parameter isn't a TypedArray instance"))
+		common.Throw(c.vu.Runtime(), NewError(TypeMismatchError, "typedArray parameter isn't a TypedArray instance"))
 	}
 
 	if objLength > maxRandomValuesLength {
-		// TODO: ideally we would prefer this to be an error that can be
-		// matched upon using something along the lines of `err isinstanceof QuotaExceededError`.
 		common.Throw(
 			c.vu.Runtime(),
 			NewError(
-				0,
 				QuotaExceededError,
 				fmt.Sprintf("typedArray parameter is too big; maximum length is %d", maxRandomValuesLength),
 			),

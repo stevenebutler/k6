@@ -12,6 +12,7 @@ import (
 	"github.com/mattn/go-isatty"
 	"github.com/sirupsen/logrus"
 
+	"go.k6.io/k6/event"
 	"go.k6.io/k6/lib/fsext"
 	"go.k6.io/k6/ui/console"
 )
@@ -39,6 +40,7 @@ type GlobalState struct {
 	BinaryName string
 	CmdArgs    []string
 	Env        map[string]string
+	Events     *event.System
 
 	DefaultFlags, Flags GlobalFlags
 
@@ -50,7 +52,7 @@ type GlobalState struct {
 	SignalNotify func(chan<- os.Signal, ...os.Signal)
 	SignalStop   func(chan<- os.Signal)
 
-	Logger         *logrus.Logger
+	Logger         *logrus.Logger //nolint:forbidigo //TODO:change to FieldLogger
 	FallbackLogger logrus.FieldLogger
 }
 
@@ -67,16 +69,16 @@ func NewGlobalState(ctx context.Context) *GlobalState {
 	stderrTTY := !isDumbTerm && (isatty.IsTerminal(os.Stderr.Fd()) || isatty.IsCygwinTerminal(os.Stderr.Fd()))
 	outMutex := &sync.Mutex{}
 	stdout := &console.Writer{
-		RawOut: os.Stdout,
-		Mutex:  outMutex,
-		Writer: colorable.NewColorable(os.Stdout),
-		IsTTY:  stdoutTTY,
+		RawOutFd: int(os.Stdout.Fd()),
+		Mutex:    outMutex,
+		Writer:   colorable.NewColorable(os.Stdout),
+		IsTTY:    stdoutTTY,
 	}
 	stderr := &console.Writer{
-		RawOut: os.Stderr,
-		Mutex:  outMutex,
-		Writer: colorable.NewColorable(os.Stderr),
-		IsTTY:  stderrTTY,
+		RawOutFd: int(os.Stderr.Fd()),
+		Mutex:    outMutex,
+		Writer:   colorable.NewColorable(os.Stderr),
+		IsTTY:    stderrTTY,
 	}
 
 	env := BuildEnvMap(os.Environ())
@@ -110,6 +112,7 @@ func NewGlobalState(ctx context.Context) *GlobalState {
 		BinaryName:   filepath.Base(binary),
 		CmdArgs:      os.Args,
 		Env:          env,
+		Events:       event.NewEventSystem(100, logger),
 		DefaultFlags: defaultFlags,
 		Flags:        getFlags(defaultFlags, env),
 		OutMutex:     outMutex,
@@ -131,21 +134,23 @@ func NewGlobalState(ctx context.Context) *GlobalState {
 
 // GlobalFlags contains global config values that apply for all k6 sub-commands.
 type GlobalFlags struct {
-	ConfigFilePath string
-	Quiet          bool
-	NoColor        bool
-	Address        string
-	LogOutput      string
-	LogFormat      string
-	Verbose        bool
+	ConfigFilePath   string
+	Quiet            bool
+	NoColor          bool
+	Address          string
+	ProfilingEnabled bool
+	LogOutput        string
+	LogFormat        string
+	Verbose          bool
 }
 
 // GetDefaultFlags returns the default global flags.
 func GetDefaultFlags(homeDir string) GlobalFlags {
 	return GlobalFlags{
-		Address:        "localhost:6565",
-		ConfigFilePath: filepath.Join(homeDir, "loadimpact", "k6", defaultConfigFileName),
-		LogOutput:      "stderr",
+		Address:          "localhost:6565",
+		ProfilingEnabled: false,
+		ConfigFilePath:   filepath.Join(homeDir, "loadimpact", "k6", defaultConfigFileName),
+		LogOutput:        "stderr",
 	}
 }
 
@@ -171,6 +176,9 @@ func getFlags(defaultFlags GlobalFlags, env map[string]string) GlobalFlags {
 	// color output from k6.
 	if _, ok := env["NO_COLOR"]; ok {
 		result.NoColor = true
+	}
+	if _, ok := env["K6_PROFILING_ENABLED"]; ok {
+		result.ProfilingEnabled = true
 	}
 	return result
 }

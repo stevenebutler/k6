@@ -7,7 +7,7 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modules"
 )
@@ -70,7 +70,7 @@ func (mi *ModuleInstance) Exports() modules.Exports {
 // It expects a single configuration object as argument, which
 // will be used to instantiate an `Object` instance internally,
 // and will be used by the client to configure itself.
-func (mi *ModuleInstance) newClient(cc goja.ConstructorCall) *goja.Object {
+func (mi *ModuleInstance) newClient(cc sobek.ConstructorCall) *sobek.Object {
 	rt := mi.vu.Runtime()
 
 	if len(cc.Arguments) < 1 {
@@ -93,7 +93,7 @@ func (mi *ModuleInstance) newClient(cc goja.ConstructorCall) *goja.Object {
 //
 // When used in the context of a k6 script, it will automatically replace
 // the imported http module's methods with instrumented ones.
-func (mi *ModuleInstance) instrumentHTTP(options options) {
+func (mi *ModuleInstance) instrumentHTTP(options sobek.Value) {
 	rt := mi.vu.Runtime()
 
 	if mi.vu.State() != nil {
@@ -109,10 +109,17 @@ func (mi *ModuleInstance) instrumentHTTP(options options) {
 		common.Throw(rt, err)
 	}
 
+	// Parse the options instance from the JS value.
+	// This will also validate the options, and set the sampling
+	// rate to 1.0 if the option was not set.
+	opts, err := newOptions(rt, options)
+	if err != nil {
+		common.Throw(rt, fmt.Errorf("unable to parse options object; reason: %w", err))
+	}
+
 	// Initialize the tracing module's instance default client,
 	// and configure it using the user-supplied set of options.
-	var err error
-	mi.Client, err = NewClient(mi.vu, options)
+	mi.Client, err = NewClient(mi.vu, opts)
 	if err != nil {
 		common.Throw(rt, err)
 	}
@@ -129,11 +136,11 @@ func (mi *ModuleInstance) instrumentHTTP(options options) {
 
 	// Closure overriding a method of the provided imported module object.
 	//
-	// The `onModule` argument should be a *goja.Object obtained by requiring
+	// The `onModule` argument should be a *sobek.Object obtained by requiring
 	// or importing the 'k6/http' module and converting it to an object.
 	//
 	// The `value` argument is expected to be callable.
-	mustSetHTTPMethod := func(method string, onModule *goja.Object, value interface{}) {
+	mustSetHTTPMethod := func(method string, onModule *sobek.Object, value interface{}) {
 		// Inject the new get function, adding tracing headers
 		// to the request in the HTTP module object.
 		err = onModule.Set(method, value)

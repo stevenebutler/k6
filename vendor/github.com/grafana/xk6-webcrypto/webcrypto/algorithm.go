@@ -4,19 +4,19 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 )
 
 // Algorithm represents
 type Algorithm struct {
-	Name AlgorithmIdentifier `json:"name"`
+	Name AlgorithmIdentifier `js:"name"`
 }
 
 // AlgorithmIdentifier represents the name of an algorithm.
 // As defined by the [specification]
 //
 // Note that it is defined as an alias of string, instead of a dedicated type,
-// to ensure it is handled as a string by goja.
+// to ensure it is handled as a string by sobek.
 //
 // [specification]: https://www.w3.org/TR/WebCryptoAPI/#algorithm-dictionary
 type AlgorithmIdentifier = string
@@ -56,27 +56,27 @@ const (
 // HashAlgorithmIdentifier represents the name of a hash algorithm.
 //
 // Note that it is defined as an alias of string, instead of a dedicated type,
-// to ensure it is handled as a string under the hood by goja.
+// to ensure it is handled as a string under the hood by sobek.
 type HashAlgorithmIdentifier = AlgorithmIdentifier
 
 const (
-	// Sha1 represents the SHA-1 algorithm.
-	Sha1 HashAlgorithmIdentifier = "SHA-1"
+	// SHA1 represents the SHA-1 algorithm.
+	SHA1 HashAlgorithmIdentifier = "SHA-1"
 
-	// Sha256 represents the SHA-256 algorithm.
-	Sha256 = "SHA-256"
+	// SHA256 represents the SHA-256 algorithm.
+	SHA256 = "SHA-256"
 
-	// Sha384 represents the SHA-384 algorithm.
-	Sha384 = "SHA-384"
+	// SHA384 represents the SHA-384 algorithm.
+	SHA384 = "SHA-384"
 
-	// Sha512 represents the SHA-512 algorithm.
-	Sha512 = "SHA-512"
+	// SHA512 represents the SHA-512 algorithm.
+	SHA512 = "SHA-512"
 )
 
 // OperationIdentifier represents the name of an operation.
 //
 // Note that it is defined as an alias of string, instead of a dedicated type,
-// to ensure it is handled as a string by goja.
+// to ensure it is handled as a string by sobek.
 type OperationIdentifier = string
 
 const (
@@ -121,7 +121,7 @@ const (
 // algorithm described in the WebCrypto [specification].
 //
 // [specification]: https://www.w3.org/TR/WebCryptoAPI/#algorithm-normalization-normalize-an-algorithm
-func normalizeAlgorithm(rt *goja.Runtime, v goja.Value, op AlgorithmIdentifier) (Algorithm, error) {
+func normalizeAlgorithm(rt *sobek.Runtime, v sobek.Value, op AlgorithmIdentifier) (Algorithm, error) {
 	var algorithm Algorithm
 
 	// "if alg is an instance of a DOMString: return the result of the running the
@@ -130,28 +130,28 @@ func normalizeAlgorithm(rt *goja.Runtime, v goja.Value, op AlgorithmIdentifier) 
 	if v.ExportType().Kind() == reflect.String {
 		algorithmString, ok := v.Export().(string)
 		if !ok {
-			return Algorithm{}, NewError(0, ImplementationError, "algorithm cannot be interpreted as a string")
+			return Algorithm{}, NewError(ImplementationError, "algorithm cannot be interpreted as a string")
 		}
 
 		algorithmObject := rt.NewObject()
 		if err := algorithmObject.Set("name", algorithmString); err != nil {
-			return Algorithm{}, NewError(0, ImplementationError, "unable to transform algorithm string into an object")
+			return Algorithm{}, NewError(ImplementationError, "unable to transform algorithm string into an object")
 		}
 
 		return normalizeAlgorithm(rt, algorithmObject, op)
 	}
 
 	if err := rt.ExportTo(v, &algorithm); err != nil {
-		return Algorithm{}, NewError(0, SyntaxError, "algorithm cannot be interpreted as a string or an object")
+		return Algorithm{}, NewError(SyntaxError, "algorithm cannot be interpreted as a string or an object")
 	}
 
-	// Algorithm identifers are always upper cased.
+	// Algorithm identifiers are always upper cased.
 	// A registered algorithm provided in lower case format, should
 	// be considered valid.
 	algorithm.Name = strings.ToUpper(algorithm.Name)
 
 	if !isRegisteredAlgorithm(algorithm.Name, op) {
-		return Algorithm{}, NewError(0, NotSupportedError, "unsupported algorithm: "+algorithm.Name)
+		return Algorithm{}, NewError(NotSupportedError, "unsupported algorithm: "+algorithm.Name)
 	}
 
 	return algorithm, nil
@@ -168,13 +168,16 @@ func isRegisteredAlgorithm(algorithmName string, forOperation string) bool {
 		return isHashAlgorithm(algorithmName)
 	case OperationIdentifierGenerateKey:
 		// FIXME: the presence of the hash algorithm here is for HMAC support and should be handled separately
-		return isAesAlgorithm(algorithmName) || isHashAlgorithm(algorithmName) || algorithmName == HMAC
+		return isAesAlgorithm(algorithmName) ||
+			isHashAlgorithm(algorithmName) ||
+			algorithmName == HMAC ||
+			isEllipticCurve(algorithmName)
 	case OperationIdentifierExportKey, OperationIdentifierImportKey:
-		return isAesAlgorithm(algorithmName) || algorithmName == HMAC
+		return isAesAlgorithm(algorithmName) || algorithmName == HMAC || isEllipticCurve(algorithmName)
 	case OperationIdentifierEncrypt, OperationIdentifierDecrypt:
 		return isAesAlgorithm(algorithmName)
 	case OperationIdentifierSign, OperationIdentifierVerify:
-		return algorithmName == HMAC
+		return algorithmName == HMAC || algorithmName == ECDSA
 	default:
 		return false
 	}
@@ -185,5 +188,15 @@ func isAesAlgorithm(algorithmName string) bool {
 }
 
 func isHashAlgorithm(algorithmName string) bool {
-	return algorithmName == Sha1 || algorithmName == Sha256 || algorithmName == Sha384 || algorithmName == Sha512
+	return algorithmName == SHA1 || algorithmName == SHA256 || algorithmName == SHA384 || algorithmName == SHA512
+}
+
+// hasAlg an internal interface that helps us to identify
+// if a given object has an algorithm method.
+type hasAlg interface {
+	alg() string
+}
+
+func isEllipticCurve(algorithmName string) bool {
+	return algorithmName == ECDH || algorithmName == ECDSA
 }

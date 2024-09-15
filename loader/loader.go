@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -23,20 +22,10 @@ import (
 type SourceData struct {
 	Data []byte
 	URL  *url.URL
+	PWD  *url.URL
 }
 
-type loaderFunc func(logger logrus.FieldLogger, path string, parts []string) (string, error)
-
-//nolint:gochecknoglobals
-var (
-	loaders = []struct {
-		name string
-		fn   loaderFunc
-		expr *regexp.Regexp
-	}{
-		{"cdnjs", cdnjs, regexp.MustCompile(`^cdnjs\.com/libraries/([^/]+)(?:/([(\d\.)]+-?[^/]*))?(?:/(.*))?$`)},
-		{"github", github, regexp.MustCompile(`^github\.com/([^/]+)/([^/]+)/(.*)$`)},
-	}
+const (
 	httpsSchemeCouldntBeLoadedMsg = `The moduleSpecifier "%s" couldn't be retrieved from` +
 		` the resolved url "%s". Error : "%s"`
 	fileSchemeCouldntBeLoadedMsg = `The moduleSpecifier "%s" couldn't be found on ` +
@@ -45,31 +34,14 @@ var (
 		`local directory (-v /local/path/:/inside/docker/path) containing ` +
 		`your script and modules so that they're accessible by k6 from ` +
 		`inside of the container, see ` +
-		`https://k6.io/docs/using-k6/modules#using-local-modules-with-docker.`
-	nothingWorkedLoadedMsg = fileSchemeCouldntBeLoadedMsg +
-		` Additionally it was tried to be loaded as remote module by prepending "https://" to it, ` +
-		`which also didn't work. Remote resolution error: "%s"`
-	errNoLoaderMatched = errors.New("no loader matched")
+		`https://grafana.com/docs/k6/latest/using-k6/modules/#using-local-modules-with-docker.`
 )
 
-// noSchemeRemoteModuleResolutionError is returned when a url with no scheme was tried to be
-// resolved and errored out
-type noSchemeRemoteModuleResolutionError struct {
-	err             error // original error
-	moduleSpecifier string
-}
+type unresolvableURLError string
 
-func (n noSchemeRemoteModuleResolutionError) Error() string {
-	return fmt.Sprintf(
-		`Module specifier "%s" was tried to be loaded as remote module by prepending "https://" to it, `+
-			`which didn't work. If you are trying to import a nodejs module, this is not supported `+
-			`as k6 is _not_ nodejs based. Please read https://k6.io/docs/using-k6/modules for more information. `+
-			`Remote resolution error: "%s"`, n.moduleSpecifier, n.err)
-}
-
-// Unwrap returns the wrapped error.
-func (n noSchemeRemoteModuleResolutionError) Unwrap() error {
-	return n.err
+func (u unresolvableURLError) Error() string {
+	// TODO potentially add more things about what k6 supports if users report being confused.
+	return fmt.Sprintf(`The moduleSpecifier %q couldn't be recognised as something k6 supports.`, (string)(u))
 }
 
 // Resolve a relative path to an absolute one.
@@ -97,18 +69,16 @@ func Resolve(pwd *url.URL, moduleSpecifier string) (*url.URL, error) {
 		}
 		return u, err
 	}
-	// here we only care if a loader is pickable, if it is and later there is an error in the loading
-	// from it we don't want to try another resolve
-	_, loader, _ := pickLoader(moduleSpecifier)
-	if loader == nil {
-		u, err := url.Parse("https://" + moduleSpecifier)
-		if err != nil {
-			return nil, noSchemeRemoteModuleResolutionError{err: err, moduleSpecifier: moduleSpecifier}
-		}
-		u.Scheme = ""
-		return u, nil
+
+	if strings.HasPrefix(moduleSpecifier, "cdnjs.com") {
+		return nil, fmt.Errorf("cdnjs.com 'special' urls are no longer supported - please use real ones. " +
+			"You can get yours by going to cdnjs and copy-pasting the full url to the actual JavaScript file")
 	}
-	return &url.URL{Opaque: moduleSpecifier}, nil
+	if strings.HasPrefix(moduleSpecifier, "github.com") {
+		return nil, fmt.Errorf("github.com 'special' urls are no longer supported - please use real ones. " +
+			"You can get yours by going to github and copy-pasting the full url to the actual raw JavaScript file")
+	}
+	return nil, unresolvableURLError(moduleSpecifier)
 }
 
 func resolveFilePath(pwd *url.URL, moduleSpecifier string) (*url.URL, error) {
@@ -143,9 +113,6 @@ func resolveFilePath(pwd *url.URL, moduleSpecifier string) (*url.URL, error) {
 
 // Dir returns the directory for the path.
 func Dir(old *url.URL) *url.URL {
-	if old.Opaque != "" { // loader
-		return &url.URL{Opaque: path.Join(old.Opaque, "../")}
-	}
 	return old.ResolveReference(&url.URL{Path: "./"})
 }
 
@@ -163,8 +130,6 @@ func Load(
 
 	var pathOnFs string
 	switch {
-	case moduleSpecifier.Opaque != "": // This is loader
-		pathOnFs = filepath.Join(fsext.FilePathSeparator, moduleSpecifier.Opaque)
 	case moduleSpecifier.Scheme == "":
 		pathOnFs = path.Clean(moduleSpecifier.String())
 	default:
@@ -172,6 +137,10 @@ func Load(
 	}
 	scheme := moduleSpecifier.Scheme
 	if scheme == "" {
+		if moduleSpecifier.Opaque == "" {
+			//nolint:stylecheck
+			return nil, fmt.Errorf(fileSchemeCouldntBeLoadedMsg, originalModuleSpecifier)
+		}
 		scheme = "https"
 	}
 
@@ -188,56 +157,25 @@ func Load(
 	if !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
-	if scheme == "https" {
-		finalModuleSpecifierURL := &url.URL{}
+	if scheme != "https" {
+		//nolint:stylecheck
+		return nil, fmt.Errorf(fileSchemeCouldntBeLoadedMsg, originalModuleSpecifier)
+	}
 
-		switch {
-		case moduleSpecifier.Opaque != "": // This is loader
-			finalModuleSpecifierURL, err = resolveUsingLoaders(logger, moduleSpecifier.Opaque)
-			if err != nil {
-				return nil, err
-			}
-		case moduleSpecifier.Scheme == "":
-			logger.Warningf(`The moduleSpecifier "%s" has no scheme but we will try to resolve it as remote module. `+
-				`This will be deprecated in the future and all remote modules will `+
-				`need to explicitly use "https" as scheme.`, originalModuleSpecifier)
-			*finalModuleSpecifierURL = *moduleSpecifier
-			finalModuleSpecifierURL.Scheme = scheme
-		default:
-			finalModuleSpecifierURL = moduleSpecifier
-		}
-		var result *SourceData
-		result, err = loadRemoteURL(logger, finalModuleSpecifierURL)
-		if err == nil {
-			result.URL = moduleSpecifier
-			// TODO maybe make an fsext.Fs which makes request directly and than use CacheOnReadFs
-			// on top of as with the `file` scheme fs
-			_ = fsext.WriteFile(filesystems[scheme], pathOnFs, result.Data, 0o644)
-			return result, nil
-		}
+	finalModuleSpecifierURL := moduleSpecifier
 
-		if moduleSpecifier.Scheme == "" && moduleSpecifier.Opaque == "" {
-			// we have an error and we did remote module resolution without a scheme
-			// let's write the coolest error message to try to help the lost soul who got to here
-			return nil, noSchemeRemoteModuleResolutionError{err: err, moduleSpecifier: originalModuleSpecifier}
-		}
+	var result *SourceData
+	result, err = loadRemoteURL(logger, finalModuleSpecifierURL)
+	if err != nil {
+		//nolint:stylecheck
 		return nil, fmt.Errorf(httpsSchemeCouldntBeLoadedMsg, originalModuleSpecifier, finalModuleSpecifierURL, err)
 	}
+	result.URL = moduleSpecifier
+	// TODO maybe make an fsext.Fs which makes request directly and than use CacheOnReadFs
+	// on top of as with the `file` scheme fs
+	_ = fsext.WriteFile(filesystems[scheme], pathOnFs, result.Data, 0o644)
 
-	return nil, fmt.Errorf(fileSchemeCouldntBeLoadedMsg, originalModuleSpecifier)
-}
-
-func resolveUsingLoaders(logger logrus.FieldLogger, name string) (*url.URL, error) {
-	_, loader, loaderArgs := pickLoader(name)
-	if loader != nil {
-		urlString, err := loader(logger, name, loaderArgs)
-		if err != nil {
-			return nil, err
-		}
-		return url.Parse(urlString)
-	}
-
-	return nil, errNoLoaderMatched
+	return result, nil
 }
 
 func loadRemoteURL(logger logrus.FieldLogger, u *url.URL) (*SourceData, error) {
@@ -263,16 +201,6 @@ func loadRemoteURL(logger logrus.FieldLogger, u *url.URL) (*SourceData, error) {
 	// <meta name="k6-import" content="github.com/myusername/repo/file.txt" />
 
 	return &SourceData{URL: u, Data: data}, nil
-}
-
-func pickLoader(path string) (string, loaderFunc, []string) {
-	for _, loader := range loaders {
-		matches := loader.expr.FindAllStringSubmatch(path, -1)
-		if len(matches) > 0 {
-			return loader.name, loader.fn, matches[0][1:]
-		}
-	}
-	return "", nil, nil
 }
 
 func fetch(logger logrus.FieldLogger, u string) ([]byte, error) {

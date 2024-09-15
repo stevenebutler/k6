@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.k6.io/k6/js/modulestest"
@@ -62,11 +62,11 @@ func TestClientInstrumentArguments(t *testing.T) {
 		testCase := newTestCase(t)
 		rt := testCase.testSetup.VU.Runtime()
 
-		gotArgs, gotErr := testCase.client.instrumentArguments(testCase.traceContextHeader, goja.Null())
+		gotArgs, gotErr := testCase.client.instrumentArguments(testCase.traceContextHeader, sobek.Null())
 
 		assert.NoError(t, gotErr)
 		assert.Len(t, gotArgs, 2)
-		assert.Equal(t, goja.Null(), gotArgs[0])
+		assert.Equal(t, sobek.Null(), gotArgs[0])
 
 		gotParams := gotArgs[1].ToObject(rt)
 		assert.NotNil(t, gotParams)
@@ -83,11 +83,11 @@ func TestClientInstrumentArguments(t *testing.T) {
 		testCase := newTestCase(t)
 		rt := testCase.testSetup.VU.Runtime()
 
-		gotArgs, gotErr := testCase.client.instrumentArguments(testCase.traceContextHeader, goja.Null(), goja.Null())
+		gotArgs, gotErr := testCase.client.instrumentArguments(testCase.traceContextHeader, sobek.Null(), sobek.Null())
 
 		assert.NoError(t, gotErr)
 		assert.Len(t, gotArgs, 2)
-		assert.Equal(t, goja.Null(), gotArgs[0])
+		assert.Equal(t, sobek.Null(), gotArgs[0])
 
 		gotParams := gotArgs[1].ToObject(rt)
 		assert.NotNil(t, gotParams)
@@ -104,11 +104,11 @@ func TestClientInstrumentArguments(t *testing.T) {
 		testCase := newTestCase(t)
 		rt := testCase.testSetup.VU.Runtime()
 
-		gotArgs, gotErr := testCase.client.instrumentArguments(testCase.traceContextHeader, goja.Null(), goja.Undefined())
+		gotArgs, gotErr := testCase.client.instrumentArguments(testCase.traceContextHeader, sobek.Null(), sobek.Undefined())
 
 		assert.NoError(t, gotErr)
 		assert.Len(t, gotArgs, 2)
-		assert.Equal(t, goja.Null(), gotArgs[0])
+		assert.Equal(t, sobek.Null(), gotArgs[0])
 
 		gotParams := gotArgs[1].ToObject(rt)
 		assert.NotNil(t, gotParams)
@@ -130,11 +130,11 @@ func TestClientInstrumentArguments(t *testing.T) {
 		wantParams := rt.NewObject()
 		require.NoError(t, wantParams.Set("headers", wantHeaders))
 
-		gotArgs, gotErr := testCase.client.instrumentArguments(testCase.traceContextHeader, goja.Null(), wantParams)
+		gotArgs, gotErr := testCase.client.instrumentArguments(testCase.traceContextHeader, sobek.Null(), wantParams)
 
 		assert.NoError(t, gotErr)
 		assert.Len(t, gotArgs, 2)
-		assert.Equal(t, goja.Null(), gotArgs[0])
+		assert.Equal(t, sobek.Null(), gotArgs[0])
 		assert.Equal(t, wantParams, gotArgs[1])
 
 		gotHeaders := gotArgs[1].ToObject(rt).Get("headers").ToObject(rt)
@@ -155,11 +155,11 @@ func TestClientInstrumentArguments(t *testing.T) {
 		rt := testCase.testSetup.VU.Runtime()
 		wantParams := rt.NewObject()
 
-		gotArgs, gotErr := testCase.client.instrumentArguments(testCase.traceContextHeader, goja.Null(), wantParams)
+		gotArgs, gotErr := testCase.client.instrumentArguments(testCase.traceContextHeader, sobek.Null(), wantParams)
 
 		assert.NoError(t, gotErr)
 		assert.Len(t, gotArgs, 2)
-		assert.Equal(t, goja.Null(), gotArgs[0])
+		assert.Equal(t, sobek.Null(), gotArgs[0])
 		assert.Equal(t, wantParams, gotArgs[1])
 
 		gotHeaders := gotArgs[1].ToObject(rt).Get("headers").ToObject(rt)
@@ -179,7 +179,7 @@ func TestClientInstrumentedCall(t *testing.T) {
 	})
 	testCase.client.propagator = NewW3CPropagator(NewAlwaysOnSampler())
 
-	callFn := func(args ...goja.Value) error {
+	callFn := func(_ ...sobek.Value) error {
 		gotMetadataTraceID, gotTraceIDKey := testCase.client.vu.State().Tags.GetCurrentValues().Metadata["trace_id"]
 		assert.True(t, gotTraceIDKey)
 		assert.NotEmpty(t, gotMetadataTraceID)
@@ -253,15 +253,11 @@ func TestCallingInstrumentedRequestEmitsTraceIdMetadata(t *testing.T) {
 	// Assert there is no trace_id key in vu metadata before calling an instrumented
 	// function, and that it's cleaned up after the call.
 	t.Cleanup(testCase.TestRuntime.EventLoop.WaitOnRegistered)
-	err = testCase.TestRuntime.EventLoop.Start(func() error {
-		_, err = rt.RunString(httpBin.Replacer.Replace(`
-        	assert_has_trace_id_metadata(false)
-        	http.request("GET", "HTTPBIN_URL")
-        	assert_has_trace_id_metadata(false)
-        `))
-
-		return err
-	})
+	_, err = testCase.TestRuntime.RunOnEventLoop(httpBin.Replacer.Replace(`
+		assert_has_trace_id_metadata(false)
+		http.request("GET", "HTTPBIN_URL")
+		assert_has_trace_id_metadata(false)
+	`))
 	require.NoError(t, err)
 	close(samples)
 

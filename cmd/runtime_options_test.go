@@ -15,6 +15,7 @@ import (
 	"go.k6.io/k6/lib/fsext"
 	"go.k6.io/k6/loader"
 	"go.k6.io/k6/metrics"
+	"go.k6.io/k6/usage"
 )
 
 type runtimeOptionsTestCase struct {
@@ -70,6 +71,7 @@ func testRuntimeOptionsCase(t *testing.T, tc runtimeOptionsTestCase) {
 			RuntimeOptions: rtOpts,
 			Registry:       registry,
 			BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
+			Usage:          usage.New(),
 		},
 	}
 
@@ -89,6 +91,7 @@ func testRuntimeOptionsCase(t *testing.T, tc runtimeOptionsTestCase) {
 				RuntimeOptions: rtOpts,
 				Registry:       registry,
 				BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
+				Usage:          usage.New(),
 			},
 		}
 	}
@@ -106,9 +109,11 @@ func testRuntimeOptionsCase(t *testing.T, tc runtimeOptionsTestCase) {
 func TestRuntimeOptions(t *testing.T) {
 	t.Parallel()
 	var (
-		defaultCompatMode  = null.NewString("extended", false)
-		baseCompatMode     = null.NewString("base", true)
-		extendedCompatMode = null.NewString("extended", true)
+		defaultCompatMode   = null.NewString("extended", false)
+		baseCompatMode      = null.NewString("base", true)
+		extendedCompatMode  = null.NewString("extended", true)
+		enhancedCompatMode  = null.NewString("experimental_enhanced", true)
+		defaultTracesOutput = null.NewString("none", false)
 	)
 
 	runtimeOptionsTestCases := map[string]runtimeOptionsTestCase{
@@ -119,6 +124,7 @@ func TestRuntimeOptions(t *testing.T) {
 				IncludeSystemEnvVars: null.NewBool(true, false),
 				CompatibilityMode:    defaultCompatMode,
 				Env:                  nil,
+				TracesOutput:         defaultTracesOutput,
 			},
 		},
 		"disabled sys env by default": {
@@ -128,6 +134,7 @@ func TestRuntimeOptions(t *testing.T) {
 				IncludeSystemEnvVars: null.NewBool(false, false),
 				CompatibilityMode:    defaultCompatMode,
 				Env:                  map[string]string{},
+				TracesOutput:         defaultTracesOutput,
 			},
 		},
 		"disabled sys env by default with ext compat mode": {
@@ -137,6 +144,17 @@ func TestRuntimeOptions(t *testing.T) {
 				IncludeSystemEnvVars: null.NewBool(false, false),
 				CompatibilityMode:    extendedCompatMode,
 				Env:                  map[string]string{},
+				TracesOutput:         defaultTracesOutput,
+			},
+		},
+		"disabled sys env by default with experimental_enhanced compat mode": {
+			useSysEnv: false,
+			systemEnv: map[string]string{"test1": "val1", "K6_COMPATIBILITY_MODE": "experimental_enhanced"},
+			expRTOpts: lib.RuntimeOptions{
+				IncludeSystemEnvVars: null.NewBool(false, false),
+				CompatibilityMode:    enhancedCompatMode,
+				Env:                  map[string]string{},
+				TracesOutput:         defaultTracesOutput,
 			},
 		},
 		"disabled sys env by cli 1": {
@@ -147,6 +165,7 @@ func TestRuntimeOptions(t *testing.T) {
 				IncludeSystemEnvVars: null.NewBool(false, true),
 				CompatibilityMode:    baseCompatMode,
 				Env:                  map[string]string{},
+				TracesOutput:         defaultTracesOutput,
 			},
 		},
 		"disabled sys env by cli 2": {
@@ -157,6 +176,7 @@ func TestRuntimeOptions(t *testing.T) {
 				IncludeSystemEnvVars: null.NewBool(false, true),
 				CompatibilityMode:    baseCompatMode,
 				Env:                  map[string]string{},
+				TracesOutput:         defaultTracesOutput,
 			},
 		},
 		"disabled sys env by env": {
@@ -166,6 +186,7 @@ func TestRuntimeOptions(t *testing.T) {
 				IncludeSystemEnvVars: null.NewBool(false, true),
 				CompatibilityMode:    extendedCompatMode,
 				Env:                  map[string]string{},
+				TracesOutput:         defaultTracesOutput,
 			},
 		},
 		"enabled sys env by env": {
@@ -175,6 +196,7 @@ func TestRuntimeOptions(t *testing.T) {
 				IncludeSystemEnvVars: null.NewBool(true, true),
 				CompatibilityMode:    extendedCompatMode,
 				Env:                  map[string]string{"K6_INCLUDE_SYSTEM_ENV_VARS": "true", "K6_COMPATIBILITY_MODE": "extended"},
+				TracesOutput:         defaultTracesOutput,
 			},
 		},
 		"enabled sys env by default": {
@@ -185,6 +207,7 @@ func TestRuntimeOptions(t *testing.T) {
 				IncludeSystemEnvVars: null.NewBool(true, false),
 				CompatibilityMode:    defaultCompatMode,
 				Env:                  map[string]string{"test1": "val1"},
+				TracesOutput:         defaultTracesOutput,
 			},
 		},
 		"enabled sys env by cli 1": {
@@ -195,6 +218,7 @@ func TestRuntimeOptions(t *testing.T) {
 				IncludeSystemEnvVars: null.NewBool(true, true),
 				CompatibilityMode:    defaultCompatMode,
 				Env:                  map[string]string{"test1": "val1"},
+				TracesOutput:         defaultTracesOutput,
 			},
 		},
 		"enabled sys env by cli 2": {
@@ -205,6 +229,7 @@ func TestRuntimeOptions(t *testing.T) {
 				IncludeSystemEnvVars: null.NewBool(true, true),
 				CompatibilityMode:    defaultCompatMode,
 				Env:                  map[string]string{"test1": "val1"},
+				TracesOutput:         defaultTracesOutput,
 			},
 		},
 		"run only system env": {
@@ -215,6 +240,7 @@ func TestRuntimeOptions(t *testing.T) {
 				IncludeSystemEnvVars: null.NewBool(true, false),
 				CompatibilityMode:    defaultCompatMode,
 				Env:                  map[string]string{"test1": "val1"},
+				TracesOutput:         defaultTracesOutput,
 			},
 		},
 		"mixed system and cli env": {
@@ -225,6 +251,7 @@ func TestRuntimeOptions(t *testing.T) {
 				IncludeSystemEnvVars: null.NewBool(true, false),
 				CompatibilityMode:    defaultCompatMode,
 				Env:                  map[string]string{"test1": "val1", "test2": "", "test3": "val3", "test4": "", "test5": ""},
+				TracesOutput:         defaultTracesOutput,
 			},
 		},
 		"mixed system and cli env 2": {
@@ -235,6 +262,7 @@ func TestRuntimeOptions(t *testing.T) {
 				IncludeSystemEnvVars: null.NewBool(true, true),
 				CompatibilityMode:    defaultCompatMode,
 				Env:                  map[string]string{"test1": "val1", "test2": "", "test3": "val3", "test4": "", "test5": ""},
+				TracesOutput:         defaultTracesOutput,
 			},
 		},
 		"disabled system env with cli params": {
@@ -245,6 +273,7 @@ func TestRuntimeOptions(t *testing.T) {
 				IncludeSystemEnvVars: null.NewBool(false, false),
 				CompatibilityMode:    defaultCompatMode,
 				Env:                  map[string]string{"test2": "val2"},
+				TracesOutput:         defaultTracesOutput,
 			},
 		},
 		"overwriting system env with cli param": {
@@ -255,6 +284,7 @@ func TestRuntimeOptions(t *testing.T) {
 				IncludeSystemEnvVars: null.NewBool(true, false),
 				CompatibilityMode:    defaultCompatMode,
 				Env:                  map[string]string{"test1": "val1cli"},
+				TracesOutput:         defaultTracesOutput,
 			},
 		},
 		"error wrong compat mode env var value": {
@@ -296,6 +326,7 @@ func TestRuntimeOptions(t *testing.T) {
 				IncludeSystemEnvVars: null.NewBool(true, false),
 				CompatibilityMode:    defaultCompatMode,
 				Env:                  map[string]string{"test1": "value 1", "test2": "value 2"},
+				TracesOutput:         defaultTracesOutput,
 			},
 		},
 		"valid env vars with special chars": {
@@ -306,6 +337,7 @@ func TestRuntimeOptions(t *testing.T) {
 				IncludeSystemEnvVars: null.NewBool(true, false),
 				CompatibilityMode:    defaultCompatMode,
 				Env:                  map[string]string{"test1": "value 1", "test2": "value,2", "test3": ` ,  ,,, value, ,, 2!'@#,"`},
+				TracesOutput:         defaultTracesOutput,
 			},
 		},
 		"summary and thresholds from env": {
@@ -318,6 +350,7 @@ func TestRuntimeOptions(t *testing.T) {
 				NoThresholds:         null.NewBool(false, true),
 				NoSummary:            null.NewBool(false, true),
 				SummaryExport:        null.NewString("foo", true),
+				TracesOutput:         defaultTracesOutput,
 			},
 		},
 		"summary and thresholds from env overwritten by CLI": {
@@ -331,6 +364,7 @@ func TestRuntimeOptions(t *testing.T) {
 				NoThresholds:         null.NewBool(true, true),
 				NoSummary:            null.NewBool(true, true),
 				SummaryExport:        null.NewString("bar", true),
+				TracesOutput:         defaultTracesOutput,
 			},
 		},
 		"env var error detected even when CLI flags overwrite 1": {
@@ -344,6 +378,36 @@ func TestRuntimeOptions(t *testing.T) {
 			systemEnv: map[string]string{"K6_NO_SUMMARY": "hoo"},
 			cliFlags:  []string{"--no-summary", "true"},
 			expErr:    true,
+		},
+		"traces output default": {
+			useSysEnv: false,
+			expRTOpts: lib.RuntimeOptions{
+				IncludeSystemEnvVars: null.NewBool(false, false),
+				CompatibilityMode:    defaultCompatMode,
+				Env:                  map[string]string{},
+				TracesOutput:         null.NewString("none", false),
+			},
+		},
+		"traces output from env": {
+			useSysEnv: false,
+			systemEnv: map[string]string{"K6_TRACES_OUTPUT": "foo"},
+			expRTOpts: lib.RuntimeOptions{
+				IncludeSystemEnvVars: null.NewBool(false, false),
+				CompatibilityMode:    defaultCompatMode,
+				Env:                  map[string]string{},
+				TracesOutput:         null.NewString("foo", true),
+			},
+		},
+		"traces output from env overwritten by CLI": {
+			useSysEnv: false,
+			systemEnv: map[string]string{"K6_TRACES_OUTPUT": "foo"},
+			cliFlags:  []string{"--traces-output", "bar"},
+			expRTOpts: lib.RuntimeOptions{
+				IncludeSystemEnvVars: null.NewBool(false, false),
+				CompatibilityMode:    defaultCompatMode,
+				Env:                  map[string]string{},
+				TracesOutput:         null.NewString("bar", true),
+			},
 		},
 	}
 	for name, tc := range runtimeOptionsTestCases {

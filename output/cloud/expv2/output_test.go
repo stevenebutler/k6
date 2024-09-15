@@ -1,7 +1,6 @@
 package expv2
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,11 +11,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/guregu/null.v3"
+
 	"go.k6.io/k6/cloudapi"
 	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/lib/types"
 	"go.k6.io/k6/metrics"
-	"gopkg.in/guregu/null.v3"
 )
 
 func TestNew(t *testing.T) {
@@ -38,11 +38,23 @@ func TestNew(t *testing.T) {
 	assert.Equal(t, int64(99), o.config.APIVersion.Int64)
 }
 
-func TestOutputSetReferenceID(t *testing.T) {
+func TestNewWithConfigOverwritten(t *testing.T) {
+	t.Parallel()
+
+	logger := testutils.NewLogger(t)
+	c := cloudapi.NewClient(logger, "my-token", "the-host", "v/foo", 1*time.Second)
+	conf := cloudapi.Config{Host: null.StringFrom("the-new-host")}
+	o, err := New(logger, conf, c)
+	require.NoError(t, err)
+	require.NotNil(t, o)
+	assert.Equal(t, "the-new-host/v1", o.cloudClient.BaseURL())
+}
+
+func TestOutputSetTestRunID(t *testing.T) {
 	t.Parallel()
 	o := Output{}
-	o.SetReferenceID("my-test-run-id")
-	assert.Equal(t, "my-test-run-id", o.referenceID)
+	o.SetTestRunID("my-test-run-id")
+	assert.Equal(t, "my-test-run-id", o.testRunID)
 }
 
 func TestOutputSetTestRunStopCallback(t *testing.T) {
@@ -74,6 +86,8 @@ func TestOutputCollectSamples(t *testing.T) {
 		logger, conf.Token.String, conf.Host.String, "v/test", conf.Timeout.TimeDuration())
 	o, err := New(logger, conf, cc)
 	require.NoError(t, err)
+
+	o.SetTestRunID("ref-id-123")
 	require.NoError(t, o.Start())
 	require.Empty(t, o.collector.bq.PopAll())
 
@@ -145,7 +159,7 @@ func TestOutputHandleFlushError(t *testing.T) {
 		},
 		{
 			name: "error code equals 4 but no abort",
-			err: cloudapi.ErrorResponse{
+			err: cloudapi.ResponseError{
 				Response: &http.Response{StatusCode: http.StatusForbidden},
 				Code:     4,
 			},
@@ -155,7 +169,7 @@ func TestOutputHandleFlushError(t *testing.T) {
 		},
 		{
 			name: "error code equals 4 and abort",
-			err: cloudapi.ErrorResponse{
+			err: cloudapi.ResponseError{
 				Response: &http.Response{StatusCode: http.StatusForbidden},
 				Code:     4,
 			},
@@ -221,7 +235,7 @@ func TestOutputHandleFlushErrorMultipleTimes(t *testing.T) {
 	}
 	o.config.StopOnError = null.BoolFrom(true)
 
-	er := cloudapi.ErrorResponse{
+	er := cloudapi.ResponseError{
 		Response: &http.Response{
 			StatusCode: http.StatusForbidden,
 		},
@@ -286,11 +300,12 @@ func TestOutputStopWithTestError(t *testing.T) {
 	o, err := New(logger, config, cc)
 	require.NoError(t, err)
 
+	o.SetTestRunID("1234")
 	require.NoError(t, o.Start())
 	require.NoError(t, o.StopWithTestError(errors.New("an error")))
 }
 
-func TestOutputFlushMetricsConcurrently(t *testing.T) {
+func TestOutputFlushTicks(t *testing.T) {
 	t.Parallel()
 
 	done := make(chan struct{})
@@ -300,20 +315,18 @@ func TestOutputFlushMetricsConcurrently(t *testing.T) {
 	//
 	// The second request unblocks.
 	var requestsCount int64
-	flusherMock := func(_ context.Context) {
+	flusherMock := func() {
 		updated := atomic.AddInt64(&requestsCount, 1)
 		if updated == 2 {
 			close(done)
 			return
 		}
-		<-done
 	}
 
 	o := Output{logger: testutils.NewLogger(t)}
-	o.config.MetricPushConcurrency = null.IntFrom(2)
-	o.config.MetricPushInterval = types.NullDurationFrom(1) // loop
+	o.config.MetricPushInterval = types.NullDurationFrom(100 * time.Millisecond) // loop
 	o.flushing = flusherFunc(flusherMock)
-	o.runFlushWorkers()
+	o.runPeriodicFlush()
 
 	select {
 	case <-time.After(5 * time.Second):
@@ -333,13 +346,13 @@ func TestOutputFlushWorkersStop(t *testing.T) {
 	o.config.MetricPushInterval = types.NullDurationFrom(1 * time.Millisecond)
 
 	once := sync.Once{}
-	flusherMock := func(_ context.Context) {
+	flusherMock := func() {
 		// it asserts that flushers are set and the flush is invoked
 		once.Do(func() { close(o.stop) })
 	}
 
 	o.flushing = flusherFunc(flusherMock)
-	o.runFlushWorkers()
+	o.runPeriodicFlush()
 
 	// it asserts that all flushers exit
 	done := make(chan struct{})
@@ -364,13 +377,13 @@ func TestOutputFlushWorkersAbort(t *testing.T) {
 	o.config.MetricPushInterval = types.NullDurationFrom(1 * time.Millisecond)
 
 	once := sync.Once{}
-	flusherMock := func(_ context.Context) {
+	flusherMock := func() {
 		// it asserts that flushers are set and the flush func is invoked
 		once.Do(func() { close(o.abort) })
 	}
 
 	o.flushing = flusherFunc(flusherMock)
-	o.runFlushWorkers()
+	o.runPeriodicFlush()
 
 	// it asserts that all flushers exit
 	done := make(chan struct{})
@@ -385,10 +398,109 @@ func TestOutputFlushWorkersAbort(t *testing.T) {
 	}
 }
 
-type flusherFunc func(context.Context)
+func TestOutputFlushRequestMetadatasConcurrently(t *testing.T) {
+	t.Parallel()
 
-func (ff flusherFunc) flush(ctx context.Context) error {
-	ff(ctx)
+	done := make(chan struct{})
+
+	// It blocks on the first request, so it asserts that the flush
+	// operations continues concurrently if one more tick is sent in the meantime.
+	//
+	// The second request unblocks.
+	var requestsCount int64
+	flusherMock := func() {
+		updated := atomic.AddInt64(&requestsCount, 1)
+		if updated == 2 {
+			close(done)
+			return
+		}
+		<-done
+	}
+
+	o := Output{logger: testutils.NewLogger(t)}
+	o.config.TracesPushConcurrency = null.IntFrom(2)
+	o.config.TracesPushInterval = types.NullDurationFrom(1) // loop
+	o.requestMetadatasFlusher = flusherFunc(flusherMock)
+	o.runFlushRequestMetadatas()
+
+	select {
+	case <-time.After(5 * time.Second):
+		t.Error("timed out")
+	case <-done:
+		assert.NotZero(t, atomic.LoadInt64(&requestsCount))
+	}
+}
+
+func TestOutputFlushRequestMetadatasStop(t *testing.T) {
+	t.Parallel()
+
+	o := Output{
+		logger: testutils.NewLogger(t),
+		stop:   make(chan struct{}),
+	}
+	o.config.TracesPushInterval = types.NullDurationFrom(1 * time.Millisecond)
+
+	once := sync.Once{}
+	flusherMock := func() {
+		// it asserts that flushers are set and the flush is invoked
+		once.Do(func() { close(o.stop) })
+	}
+
+	o.requestMetadatasFlusher = flusherFunc(flusherMock)
+	o.runFlushRequestMetadatas()
+
+	// it asserts that all flushers exit
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		o.wg.Wait()
+	}()
+	select {
+	case <-time.After(time.Second):
+		t.Error("timed out")
+	case <-done:
+	}
+}
+
+func TestOutputFlushRequestMetadatasAbort(t *testing.T) {
+	t.Parallel()
+
+	o := Output{
+		logger: testutils.NewLogger(t),
+		abort:  make(chan struct{}),
+	}
+	o.config.TracesPushInterval = types.NullDurationFrom(1 * time.Millisecond)
+
+	once := sync.Once{}
+	flusherMock := func() {
+		// it asserts that flushers are set and the flush func is invoked
+		once.Do(func() { close(o.abort) })
+	}
+
+	o.requestMetadatasFlusher = flusherFunc(flusherMock)
+	o.runFlushRequestMetadatas()
+
+	// it asserts that all flushers exit
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		o.wg.Wait()
+	}()
+	select {
+	case <-time.After(time.Second):
+		t.Error("timed out")
+	case <-done:
+	}
+}
+
+type flusherFunc func()
+
+func (ff flusherFunc) Flush() error {
+	return ff.flush()
+}
+
+func (ff flusherFunc) flush() error {
+	ff()
 	return nil
 }
 

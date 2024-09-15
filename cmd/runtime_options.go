@@ -23,10 +23,10 @@ func runtimeOptionFlagSet(includeSysEnv bool) *pflag.FlagSet {
 	flags.SortFlags = false
 	flags.Bool("include-system-env-vars", includeSysEnv, "pass the real system environment variables to the runtime")
 	flags.String("compatibility-mode", "extended",
-		`JavaScript compiler compatibility mode, "extended" or "base"
-base: pure goja - Golang JS VM supporting ES5.1+
-extended: base + Babel with parts of ES2015 preset
-		  slower to compile in case the script uses syntax unsupported by base
+		`JavaScript compiler compatibility mode, "extended" or "base" or "experimental_enhanced"
+base: pure Sobek - Golang JS VM supporting ES6+
+extended: base + sets "global" as alias for "globalThis"
+experimental_enhanced: esbuild-based transpiling for TypeScript and ES6+ support
 `)
 	flags.StringP("type", "t", "", "override test type, \"js\" or \"archive\"")
 	flags.StringArrayP("env", "e", nil, "add/override environment variable with `VAR=value`")
@@ -37,6 +37,8 @@ extended: base + Babel with parts of ES2015 preset
 		"",
 		"output the end-of-test summary report to JSON file",
 	)
+	flags.String("traces-output", "none",
+		"set the output for k6 traces, possible values are none,otel[=host:port]")
 	return flags
 }
 
@@ -66,6 +68,7 @@ func getRuntimeOptions(flags *pflag.FlagSet, environment map[string]string) (lib
 		NoThresholds:         getNullBool(flags, "no-thresholds"),
 		NoSummary:            getNullBool(flags, "no-summary"),
 		SummaryExport:        getNullString(flags, "summary-export"),
+		TracesOutput:         getNullString(flags, "traces-output"),
 		Env:                  make(map[string]string),
 	}
 
@@ -101,6 +104,12 @@ func getRuntimeOptions(flags *pflag.FlagSet, environment map[string]string) (lib
 	if envVar, ok := environment["SSLKEYLOGFILE"]; ok {
 		if !opts.KeyWriter.Valid {
 			opts.KeyWriter = null.StringFrom(envVar)
+		}
+	}
+
+	if envVar, ok := environment["K6_TRACES_OUTPUT"]; ok {
+		if !opts.TracesOutput.Valid {
+			opts.TracesOutput = null.StringFrom(envVar)
 		}
 	}
 

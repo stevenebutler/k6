@@ -1,112 +1,43 @@
-package grpc
+package grpc_test
 
 import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"errors"
-	"io"
-	"net/url"
-	"os"
-	"runtime"
+	"crypto/x509"
+	"fmt"
 	"strings"
 	"testing"
 
-	"google.golang.org/grpc/reflection"
-
-	"github.com/dop251/goja"
-	"github.com/golang/protobuf/ptypes/any"
-	"github.com/sirupsen/logrus"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
-	grpcstats "google.golang.org/grpc/stats"
-	"google.golang.org/grpc/status"
-	"gopkg.in/guregu/null.v3"
-
-	"go.k6.io/k6/js/modulestest"
-	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/fsext"
+	k6grpc "go.k6.io/k6/js/modules/k6/grpc"
 	"go.k6.io/k6/lib/netext/grpcext"
-	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/lib/testutils/httpmultibin"
 	grpcanytesting "go.k6.io/k6/lib/testutils/httpmultibin/grpc_any_testing"
 	"go.k6.io/k6/lib/testutils/httpmultibin/grpc_testing"
+	"go.k6.io/k6/lib/testutils/httpmultibin/grpc_wrappers_testing"
 	"go.k6.io/k6/metrics"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
+	"google.golang.org/protobuf/types/known/wrapperspb"
+
+	"github.com/golang/protobuf/ptypes/any"
+	_struct "github.com/golang/protobuf/ptypes/struct"
+	"github.com/golang/protobuf/ptypes/wrappers"
+	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
+	"google.golang.org/grpc/metadata"
+	v1alphagrpc "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
+	grpcstats "google.golang.org/grpc/stats"
+	"gopkg.in/guregu/null.v3"
 )
-
-const isWindows = runtime.GOOS == "windows"
-
-// codeBlock represents an execution of a k6 script.
-type codeBlock struct {
-	code       string
-	val        interface{}
-	err        string
-	windowsErr string
-	asserts    func(*testing.T, *httpmultibin.HTTPMultiBin, chan metrics.SampleContainer, error)
-}
-
-type testcase struct {
-	name       string
-	setup      func(*httpmultibin.HTTPMultiBin)
-	initString codeBlock // runs in the init context
-	vuString   codeBlock // runs in the vu context
-}
 
 func TestClient(t *testing.T) {
 	t.Parallel()
-
-	type testState struct {
-		*modulestest.Runtime
-		httpBin *httpmultibin.HTTPMultiBin
-		samples chan metrics.SampleContainer
-	}
-	setup := func(t *testing.T) testState {
-		t.Helper()
-
-		tb := httpmultibin.NewHTTPMultiBin(t)
-		samples := make(chan metrics.SampleContainer, 1000)
-		testRuntime := modulestest.NewRuntime(t)
-
-		cwd, err := os.Getwd()
-		require.NoError(t, err)
-		fs := fsext.NewOsFs()
-		if isWindows {
-			fs = fsext.NewTrimFilePathSeparatorFs(fs)
-		}
-		testRuntime.VU.InitEnvField.CWD = &url.URL{Path: cwd}
-		testRuntime.VU.InitEnvField.FileSystems = map[string]fsext.Fs{"file": fs}
-
-		return testState{
-			Runtime: testRuntime,
-			httpBin: tb,
-			samples: samples,
-		}
-	}
-
-	assertMetricEmitted := func(
-		t *testing.T,
-		metricName string,
-		sampleContainers []metrics.SampleContainer,
-		url string,
-	) {
-		seenMetric := false
-
-		for _, sampleContainer := range sampleContainers {
-			for _, sample := range sampleContainer.GetSamples() {
-				surl, ok := sample.Tags.Get("url")
-				assert.True(t, ok)
-				if surl == url {
-					if sample.Metric.Name == metricName {
-						seenMetric = true
-					}
-				}
-			}
-		}
-		assert.True(t, seenMetric, "url %s didn't emit %s", url, metricName)
-	}
 
 	tests := []testcase{
 		{
@@ -152,7 +83,7 @@ func TestClient(t *testing.T) {
 				code: `
 			var client = new grpc.Client();
 			client.load([], "../../../../lib/testutils/httpmultibin/grpc_testing/test.proto");`,
-				val: []MethodInfo{{MethodInfo: grpc.MethodInfo{Name: "EmptyCall", IsClientStream: false, IsServerStream: false}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/EmptyCall"}, {MethodInfo: grpc.MethodInfo{Name: "UnaryCall", IsClientStream: false, IsServerStream: false}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/UnaryCall"}, {MethodInfo: grpc.MethodInfo{Name: "StreamingOutputCall", IsClientStream: false, IsServerStream: true}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/StreamingOutputCall"}, {MethodInfo: grpc.MethodInfo{Name: "StreamingInputCall", IsClientStream: true, IsServerStream: false}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/StreamingInputCall"}, {MethodInfo: grpc.MethodInfo{Name: "FullDuplexCall", IsClientStream: true, IsServerStream: true}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/FullDuplexCall"}, {MethodInfo: grpc.MethodInfo{Name: "HalfDuplexCall", IsClientStream: true, IsServerStream: true}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/HalfDuplexCall"}},
+				val: []k6grpc.MethodInfo{{MethodInfo: grpc.MethodInfo{Name: "EmptyCall", IsClientStream: false, IsServerStream: false}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/EmptyCall"}, {MethodInfo: grpc.MethodInfo{Name: "UnaryCall", IsClientStream: false, IsServerStream: false}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/UnaryCall"}, {MethodInfo: grpc.MethodInfo{Name: "StreamingOutputCall", IsClientStream: false, IsServerStream: true}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/StreamingOutputCall"}, {MethodInfo: grpc.MethodInfo{Name: "StreamingInputCall", IsClientStream: true, IsServerStream: false}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/StreamingInputCall"}, {MethodInfo: grpc.MethodInfo{Name: "FullDuplexCall", IsClientStream: true, IsServerStream: true}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/FullDuplexCall"}, {MethodInfo: grpc.MethodInfo{Name: "HalfDuplexCall", IsClientStream: true, IsServerStream: true}, Package: "grpc.testing", Service: "TestService", FullMethod: "/grpc.testing.TestService/HalfDuplexCall"}},
 			},
 		},
 		{
@@ -179,7 +110,7 @@ func TestClient(t *testing.T) {
 				code: `
 			var client = new grpc.Client();
 			client.loadProtoset("../../../../lib/testutils/httpmultibin/grpc_protoset_testing/test.protoset");`,
-				val: []MethodInfo{
+				val: []k6grpc.MethodInfo{
 					{
 						MethodInfo: grpc.MethodInfo{Name: "Test", IsClientStream: false, IsServerStream: false},
 						Package:    "grpc.protoset.testing", Service: "TestService", FullMethod: "/grpc.protoset.testing.TestService/Test",
@@ -293,6 +224,22 @@ func TestClient(t *testing.T) {
 			},
 		},
 		{
+			name: "AsyncInvokeInvalidParam",
+			initString: codeBlock{code: `
+				var client = new grpc.Client();
+				client.load([], "../../../../lib/testutils/httpmultibin/grpc_testing/test.proto");`},
+			vuString: codeBlock{
+				code: `
+				client.connect("GRPCBIN_ADDR");
+				client.asyncInvoke("grpc.testing.TestService/EmptyCall", {}, { void: true }).then(function(resp) {
+					throw new Error("should not be here")
+				}, (err) => {
+					throw new Error(err)
+				})`,
+				err: `unknown param: "void"`,
+			},
+		},
+		{
 			name: "InvokeNilRequest",
 			initString: codeBlock{code: `
 				var client = new grpc.Client();
@@ -364,6 +311,19 @@ func TestClient(t *testing.T) {
 			},
 		},
 		{
+			name: "InvokeDiscardResponseMessage",
+			initString: codeBlock{
+				code: `
+				var client = new grpc.Client();
+				client.load([], "../../../../lib/testutils/httpmultibin/grpc_testing/test.proto");`,
+			},
+			vuString: codeBlock{
+				code: `
+				client.connect("GRPCBIN_ADDR");
+				client.invoke("grpc.testing.TestService/EmptyCall", {}, { discardResponseMessage: true })`,
+			},
+		},
+		{
 			name: "Invoke",
 			initString: codeBlock{code: `
 				var client = new grpc.Client();
@@ -387,12 +347,95 @@ func TestClient(t *testing.T) {
 			},
 		},
 		{
+			name: "InvokeDiscardResponseMessage",
+			initString: codeBlock{code: `
+				var client = new grpc.Client();
+				client.load([], "../../../../lib/testutils/httpmultibin/grpc_testing/test.proto");`},
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				tb.GRPCStub.EmptyCallFunc = func(context.Context, *grpc_testing.Empty) (*grpc_testing.Empty, error) {
+					return &grpc_testing.Empty{}, nil
+				}
+			},
+			vuString: codeBlock{
+				code: `
+				client.connect("GRPCBIN_ADDR");
+				var resp = client.invoke("grpc.testing.TestService/EmptyCall", {}, { discardResponseMessage: true })
+				if (resp.status !== grpc.StatusOK) {
+					throw new Error("unexpected error: " + JSON.stringify(resp.error) + "or status: " + resp.status)
+				}
+				if (resp.message !== null) {
+					throw new Error("unexpected message: " + JSON.stringify(resp.message))
+				}`,
+				asserts: func(t *testing.T, rb *httpmultibin.HTTPMultiBin, samples chan metrics.SampleContainer, _ error) {
+					samplesBuf := metrics.GetBufferedSamples(samples)
+					assertMetricEmitted(t, metrics.GRPCReqDurationName, samplesBuf, rb.Replacer.Replace("GRPCBIN_ADDR/grpc.testing.TestService/EmptyCall"))
+				},
+			},
+		},
+		{
+			name: "AsyncInvoke",
+			initString: codeBlock{code: `
+				var client = new grpc.Client();
+				client.load([], "../../../../lib/testutils/httpmultibin/grpc_testing/test.proto");`},
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				tb.GRPCStub.EmptyCallFunc = func(context.Context, *grpc_testing.Empty) (*grpc_testing.Empty, error) {
+					return &grpc_testing.Empty{}, nil
+				}
+			},
+			vuString: codeBlock{
+				code: `
+				client.connect("GRPCBIN_ADDR");
+				client.asyncInvoke("grpc.testing.TestService/EmptyCall", {}).then(function(resp) {
+					if (resp.status !== grpc.StatusOK) {
+						throw new Error("unexpected error: " + JSON.stringify(resp.error) + "or status: " + resp.status)
+					}
+				}, (err) => {
+					throw new Error("unexpected error: " + err)
+				})
+				`,
+				asserts: func(t *testing.T, rb *httpmultibin.HTTPMultiBin, samples chan metrics.SampleContainer, _ error) {
+					samplesBuf := metrics.GetBufferedSamples(samples)
+					assertMetricEmitted(t, metrics.GRPCReqDurationName, samplesBuf, rb.Replacer.Replace("GRPCBIN_ADDR/grpc.testing.TestService/EmptyCall"))
+				},
+			},
+		},
+		{
+			name: "AsyncInvokeDiscardResponseMessage",
+			initString: codeBlock{code: `
+				var client = new grpc.Client();
+				client.load([], "../../../../lib/testutils/httpmultibin/grpc_testing/test.proto");`},
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				tb.GRPCStub.EmptyCallFunc = func(context.Context, *grpc_testing.Empty) (*grpc_testing.Empty, error) {
+					return &grpc_testing.Empty{}, nil
+				}
+			},
+			vuString: codeBlock{
+				code: `
+				client.connect("GRPCBIN_ADDR");
+				client.asyncInvoke("grpc.testing.TestService/EmptyCall", {}, { discardResponseMessage: true }).then(function(resp) {
+					if (resp.status !== grpc.StatusOK) {
+						throw new Error("unexpected error: " + JSON.stringify(resp.error) + "or status: " + resp.status)
+					}
+					if (resp.message !== null) {
+						throw new Error("unexpected message: " + JSON.stringify(resp.message))
+					}
+				}, (err) => {
+					throw new Error("unexpected error: " + err)
+				})
+				`,
+				asserts: func(t *testing.T, rb *httpmultibin.HTTPMultiBin, samples chan metrics.SampleContainer, _ error) {
+					samplesBuf := metrics.GetBufferedSamples(samples)
+					assertMetricEmitted(t, metrics.GRPCReqDurationName, samplesBuf, rb.Replacer.Replace("GRPCBIN_ADDR/grpc.testing.TestService/EmptyCall"))
+				},
+			},
+		},
+		{
 			name: "InvokeAnyProto",
 			initString: codeBlock{code: `
 				var client = new grpc.Client();
 				client.load([], "../../../../lib/testutils/httpmultibin/grpc_any_testing/any_test.proto");`},
 			setup: func(tb *httpmultibin.HTTPMultiBin) {
-				tb.GRPCAnyStub.SumFunc = func(ctx context.Context, req *grpcanytesting.SumRequest) (*grpcanytesting.SumReply, error) {
+				tb.GRPCAnyStub.SumFunc = func(_ context.Context, req *grpcanytesting.SumRequest) (*grpcanytesting.SumReply, error) {
 					var sumRequestData grpcanytesting.SumRequestData
 					if err := req.Data.UnmarshalTo(&sumRequestData); err != nil {
 						return nil, err
@@ -457,6 +500,32 @@ func TestClient(t *testing.T) {
 				}`},
 		},
 		{
+			name: "AsyncRequestMessage",
+			initString: codeBlock{
+				code: `
+				var client = new grpc.Client();
+				client.load([], "../../../../lib/testutils/httpmultibin/grpc_testing/test.proto");`,
+			},
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				tb.GRPCStub.UnaryCallFunc = func(_ context.Context, req *grpc_testing.SimpleRequest) (*grpc_testing.SimpleResponse, error) {
+					if req.Payload == nil || string(req.Payload.Body) != "负载测试" {
+						return nil, status.Error(codes.InvalidArgument, "")
+					}
+					return &grpc_testing.SimpleResponse{}, nil
+				}
+			},
+			vuString: codeBlock{code: `
+				client.connect("GRPCBIN_ADDR");
+				client.asyncInvoke("grpc.testing.TestService/UnaryCall", { payload: { body: "6LSf6L295rWL6K+V"} }).then(function(resp) {
+					if (resp.status !== grpc.StatusOK) {
+						throw new Error("server did not receive the correct request message")
+					}
+				}, (err) => {
+					throw new Error("unexpected error: " + err)
+				});
+				`},
+		},
+		{
 			name: "RequestHeaders",
 			initString: codeBlock{
 				code: `
@@ -476,6 +545,31 @@ func TestClient(t *testing.T) {
 			vuString: codeBlock{code: `
 				client.connect("GRPCBIN_ADDR");
 				var resp = client.invoke("grpc.testing.TestService/EmptyCall", {}, { metadata: { "X-Load-Tester": "k6" } })
+				if (resp.status !== grpc.StatusOK) {
+					throw new Error("failed to send correct headers in the request")
+				}
+			`},
+		},
+		{
+			name: "RequestBinHeaders",
+			initString: codeBlock{
+				code: `
+				var client = new grpc.Client();
+				client.load([], "../../../../lib/testutils/httpmultibin/grpc_testing/test.proto");`,
+			},
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				tb.GRPCStub.EmptyCallFunc = func(ctx context.Context, _ *grpc_testing.Empty) (*grpc_testing.Empty, error) {
+					md, ok := metadata.FromIncomingContext(ctx)
+					if !ok || len(md["x-load-tester-bin"]) == 0 || md["x-load-tester-bin"][0] != string([]byte{2, 200}) {
+						return nil, status.Error(codes.FailedPrecondition, "")
+					}
+
+					return &grpc_testing.Empty{}, nil
+				}
+			},
+			vuString: codeBlock{code: `
+				client.connect("GRPCBIN_ADDR");
+				var resp = client.invoke("grpc.testing.TestService/EmptyCall", {}, { metadata: { "X-Load-Tester-bin": new Uint8Array([2, 200]) } })
 				if (resp.status !== grpc.StatusOK) {
 					throw new Error("failed to send correct headers in the request")
 				}
@@ -502,6 +596,37 @@ func TestClient(t *testing.T) {
 				if (!resp.message || resp.message.username !== "" || resp.message.oauthScope !== "水") {
 					throw new Error("unexpected response message: " + JSON.stringify(resp.message))
 				}`,
+				asserts: func(t *testing.T, rb *httpmultibin.HTTPMultiBin, samples chan metrics.SampleContainer, _ error) {
+					samplesBuf := metrics.GetBufferedSamples(samples)
+					assertMetricEmitted(t, metrics.GRPCReqDurationName, samplesBuf, rb.Replacer.Replace("GRPCBIN_ADDR/grpc.testing.TestService/UnaryCall"))
+				},
+			},
+		},
+		{
+			name: "AsyncResponseMessage",
+			initString: codeBlock{
+				code: `
+				var client = new grpc.Client();
+				client.load([], "../../../../lib/testutils/httpmultibin/grpc_testing/test.proto");`,
+			},
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				tb.GRPCStub.UnaryCallFunc = func(context.Context, *grpc_testing.SimpleRequest) (*grpc_testing.SimpleResponse, error) {
+					return &grpc_testing.SimpleResponse{
+						OauthScope: "水",
+					}, nil
+				}
+			},
+			vuString: codeBlock{
+				code: `
+				client.connect("GRPCBIN_ADDR");
+				client.asyncInvoke("grpc.testing.TestService/UnaryCall", {}).then(function(resp) {
+					if (!resp.message || resp.message.username !== "" || resp.message.oauthScope !== "水") {
+						throw new Error("unexpected response message: " + JSON.stringify(resp.message))
+					}
+				}, (err) => {
+					throw new Error("unexpected error: " + err)
+				});
+				`,
 				asserts: func(t *testing.T, rb *httpmultibin.HTTPMultiBin, samples chan metrics.SampleContainer, _ error) {
 					samplesBuf := metrics.GetBufferedSamples(samples)
 					assertMetricEmitted(t, metrics.GRPCReqDurationName, samplesBuf, rb.Replacer.Replace("GRPCBIN_ADDR/grpc.testing.TestService/UnaryCall"))
@@ -638,6 +763,18 @@ func TestClient(t *testing.T) {
 			},
 		},
 		{
+			name: "ReflectV1",
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				reflection.RegisterV1(tb.ServerGRPC)
+			},
+			initString: codeBlock{
+				code: `var client = new grpc.Client();`,
+			},
+			vuString: codeBlock{
+				code: `client.connect("GRPCBIN_ADDR", {reflect: true})`,
+			},
+		},
+		{
 			name: "ReflectBadParam",
 			setup: func(tb *httpmultibin.HTTPMultiBin) {
 				reflection.Register(tb.ServerGRPC)
@@ -654,7 +791,7 @@ func TestClient(t *testing.T) {
 			name: "ReflectInvokeNoExist",
 			setup: func(tb *httpmultibin.HTTPMultiBin) {
 				reflection.Register(tb.ServerGRPC)
-				tb.GRPCStub.EmptyCallFunc = func(ctx context.Context, _ *grpc_testing.Empty) (*grpc_testing.Empty, error) {
+				tb.GRPCStub.EmptyCallFunc = func(_ context.Context, _ *grpc_testing.Empty) (*grpc_testing.Empty, error) {
 					return &grpc_testing.Empty{}, nil
 				}
 			},
@@ -672,8 +809,52 @@ func TestClient(t *testing.T) {
 		{
 			name: "ReflectInvoke",
 			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				// this register both reflection APIs v1 and v1alpha
 				reflection.Register(tb.ServerGRPC)
-				tb.GRPCStub.EmptyCallFunc = func(ctx context.Context, _ *grpc_testing.Empty) (*grpc_testing.Empty, error) {
+
+				tb.GRPCStub.EmptyCallFunc = func(_ context.Context, _ *grpc_testing.Empty) (*grpc_testing.Empty, error) {
+					return &grpc_testing.Empty{}, nil
+				}
+			},
+			initString: codeBlock{
+				code: `var client = new grpc.Client();`,
+			},
+			vuString: codeBlock{
+				code: `
+					client.connect("GRPCBIN_ADDR", {reflect: true})
+					client.invoke("grpc.testing.TestService/EmptyCall", {})
+				`,
+			},
+		},
+		{
+			name: "ReflectV1Alpha_Invoke",
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				// this register only v1alpha (this could be removed with removal v1alpha from grpc-go)
+				s := tb.ServerGRPC
+				svr := reflection.NewServer(reflection.ServerOptions{Services: s})
+				v1alphagrpc.RegisterServerReflectionServer(s, svr)
+
+				tb.GRPCStub.EmptyCallFunc = func(_ context.Context, _ *grpc_testing.Empty) (*grpc_testing.Empty, error) {
+					return &grpc_testing.Empty{}, nil
+				}
+			},
+			initString: codeBlock{
+				code: `var client = new grpc.Client();`,
+			},
+			vuString: codeBlock{
+				code: `
+					client.connect("GRPCBIN_ADDR", {reflect: true})
+					client.invoke("grpc.testing.TestService/EmptyCall", {})
+				`,
+			},
+		},
+		{
+			name: "ReflectV1Invoke",
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				// this register only reflection APIs v1
+				reflection.RegisterV1(tb.ServerGRPC)
+
+				tb.GRPCStub.EmptyCallFunc = func(_ context.Context, _ *grpc_testing.Empty) (*grpc_testing.Empty, error) {
 					return &grpc_testing.Empty{}, nil
 				}
 			},
@@ -801,70 +982,308 @@ func TestClient(t *testing.T) {
 				err: "no gRPC connection",
 			},
 		},
+		{
+			name: "Wrappers",
+			setup: func(hb *httpmultibin.HTTPMultiBin) {
+				srv := grpc_wrappers_testing.Register(hb.ServerGRPC)
+
+				srv.TestStringImplementation = func(_ context.Context, sv *wrappers.StringValue) (*wrappers.StringValue, error) {
+					return &wrapperspb.StringValue{
+						Value: "hey " + sv.Value,
+					}, nil
+				}
+			},
+			initString: codeBlock{
+				code: `
+				const client = new grpc.Client();
+				client.load([], "../../../../lib/testutils/httpmultibin/grpc_wrappers_testing/test.proto");
+				`,
+			},
+			vuString: codeBlock{
+				code: `
+				client.connect("GRPCBIN_ADDR");
+
+				let respString = client.invoke("grpc.wrappers.testing.Service/TestString", "John")
+				if (respString.message !== "hey John") {
+					throw new Error("expected to get 'hey John', but got a " + respString.message)
+				}
+			`,
+			},
+		},
+		{
+			name: "WrappersWithReflection",
+			setup: func(hb *httpmultibin.HTTPMultiBin) {
+				reflection.Register(hb.ServerGRPC)
+
+				srv := grpc_wrappers_testing.Register(hb.ServerGRPC)
+
+				srv.TestIntegerImplementation = func(_ context.Context, iv *wrappers.Int64Value) (*wrappers.Int64Value, error) {
+					return &wrappers.Int64Value{
+						Value: 2 * iv.Value,
+					}, nil
+				}
+
+				srv.TestStringImplementation = func(_ context.Context, sv *wrappers.StringValue) (*wrappers.StringValue, error) {
+					return &wrapperspb.StringValue{
+						Value: "hey " + sv.Value,
+					}, nil
+				}
+
+				srv.TestBooleanImplementation = func(_ context.Context, bv *wrappers.BoolValue) (*wrappers.BoolValue, error) {
+					return &wrapperspb.BoolValue{
+						Value: bv.Value != true,
+					}, nil
+				}
+
+				srv.TestDoubleImplementation = func(_ context.Context, bv *wrappers.DoubleValue) (*wrappers.DoubleValue, error) {
+					return &wrapperspb.DoubleValue{
+						Value: bv.Value * 2,
+					}, nil
+				}
+			},
+			initString: codeBlock{
+				code: `
+				const client = new grpc.Client();
+				`,
+			},
+			vuString: codeBlock{
+				code: `
+				client.connect("GRPCBIN_ADDR", {reflect: true});
+
+				let respString = client.invoke("grpc.wrappers.testing.Service/TestString", "John")
+				if (respString.message !== "hey John") {
+					throw new Error("expected to get 'hey John', but got a " + respString.message)
+				}
+
+				let respInt = client.invoke("grpc.wrappers.testing.Service/TestInteger", "3")
+				if (respInt.message !== "6") {
+					throw new Error("expected to get '6', but got a " + respInt.message)
+				}
+
+				let respDouble = client.invoke("grpc.wrappers.testing.Service/TestDouble", "2.7")
+				if (respDouble.message !== 5.4) {
+					throw new Error("expected to get '5.4', but got a " + respDouble.message)
+				}
+			`,
+			},
+		},
+		{
+			name: "ValueReflection",
+			setup: func(hb *httpmultibin.HTTPMultiBin) {
+				reflection.Register(hb.ServerGRPC)
+
+				srv := grpc_wrappers_testing.Register(hb.ServerGRPC)
+
+				srv.TestValueImplementation = func(_ context.Context, in *_struct.Value) (*_struct.Value, error) {
+					if in.GetNumberValue() == 12 {
+						return &_struct.Value{
+							Kind: &_struct.Value_NumberValue{
+								NumberValue: 42,
+							},
+						}, nil
+					}
+
+					if in.GetStringValue() != "" {
+						return &_struct.Value{
+							Kind: &_struct.Value_StringValue{
+								StringValue: "hey " + in.GetStringValue(),
+							},
+						}, nil
+					}
+
+					return &_struct.Value{
+						Kind: &_struct.Value_StringValue{
+							StringValue: "I don't know what to answer",
+						},
+					}, nil
+				}
+			},
+			initString: codeBlock{
+				code: `
+				const client = new grpc.Client();
+				`,
+			},
+			vuString: codeBlock{
+				code: `
+				client.connect("GRPCBIN_ADDR", {reflect: true});
+
+				let respString = client.invoke("grpc.wrappers.testing.Service/TestValue", "John")
+				if (respString.message !== "hey John") {
+					throw new Error("expected to get 'hey John', but got a " + respString.message)
+				}
+
+				let respNumber = client.invoke("grpc.wrappers.testing.Service/TestValue", 12)
+				if (respNumber.message !== 42) {
+					throw new Error("expected to get '42', but got a " + respNumber.message)
+				}
+
+				let respBool = client.invoke("grpc.wrappers.testing.Service/TestValue", false)
+				if (respBool.message !== "I don't know what to answer") {
+					throw new Error("expected to get 'I don't know what to answer', but got a " + respBool.message)
+				}
+			`,
+			},
+		},
 	}
 
-	assertResponse := func(t *testing.T, cb codeBlock, err error, val goja.Value, ts testState) {
-		if isWindows && cb.windowsErr != "" && err != nil {
-			err = errors.New(strings.ReplaceAll(err.Error(), cb.windowsErr, cb.err))
-		}
-		if cb.err == "" {
-			assert.NoError(t, err)
-		} else {
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), cb.err)
-		}
-		if cb.val != nil {
-			require.NotNil(t, val)
-			assert.Equal(t, cb.val, val.Export())
-		}
-		if cb.asserts != nil {
-			cb.asserts(t, ts.httpBin, ts.samples, err)
-		}
-	}
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			ts := setup(t)
-
-			m, ok := New().NewModuleInstance(ts.VU).(*ModuleInstance)
-			require.True(t, ok)
-			require.NoError(t, ts.VU.Runtime().Set("grpc", m.Exports().Named))
+			ts := newTestState(t)
 
 			// setup necessary environment if needed by a test
 			if tt.setup != nil {
 				tt.setup(ts.httpBin)
 			}
 
-			replace := func(code string) (goja.Value, error) {
-				return ts.VU.Runtime().RunString(ts.httpBin.Replacer.Replace(code))
-			}
-
-			val, err := replace(tt.initString.code)
+			val, err := ts.Run(tt.initString.code)
 			assertResponse(t, tt.initString, err, val, ts)
 
-			registry := metrics.NewRegistry()
-			root, err := lib.NewGroup("", nil)
-			require.NoError(t, err)
+			ts.ToVUContext()
+			val, err = ts.RunOnEventLoop(tt.vuString.code)
+			assertResponse(t, tt.vuString, err, val, ts)
+		})
+	}
+}
 
-			state := &lib.State{
-				Group:     root,
-				Dialer:    ts.httpBin.Dialer,
-				TLSConfig: ts.httpBin.TLSClientConfig,
-				Samples:   ts.samples,
-				Options: lib.Options{
-					SystemTags: metrics.NewSystemTagSet(
-						metrics.TagName,
-						metrics.TagURL,
-					),
-					UserAgent: null.StringFrom("k6-test"),
-				},
-				BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
-				Tags:           lib.NewVUStateTags(registry.RootTagSet()),
+func TestClient_TlsParameters(t *testing.T) {
+	t.Parallel()
+
+	testingKey := func(s string) string {
+		t.Helper()
+		return strings.ReplaceAll(s, "TESTING KEY", "PRIVATE KEY")
+	}
+
+	clientAuthCA := []byte("-----BEGIN CERTIFICATE-----\nMIIBWzCCAQGgAwIBAgIJAIQMBgLi+DV6MAoGCCqGSM49BAMCMBAxDjAMBgNVBAMM\nBU15IENBMCAXDTIyMDEyMTEyMjkzNloYDzMwMjEwNTI0MTIyOTM2WjAQMQ4wDAYD\nVQQDDAVNeSBDQTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABHnrghULHa2hSa/C\nWimwCn42KWdlPqd6/zs3JgLIxTvBHJJlfbhWbBqtybqyovWd3QykHMIpx0NZmpYn\nG8FoWpmjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MB0GA1Ud\nDgQWBBSkukBA8lgFvvBJAYKsoSUR+PX71jAKBggqhkjOPQQDAgNIADBFAiEAiFF7\nY54CMNRSBSVMgd4mQgrzJInRH88KpLsQ7VeOAaQCIEa0vaLln9zxIDZQKocml4Db\nAEJr8tDzMKIds6sRTBT4\n-----END CERTIFICATE-----")
+	localHostCert := "-----BEGIN CERTIFICATE-----\\nMIIDOTCCAiGgAwIBAgIQSRJrEpBGFc7tNb1fb5pKFzANBgkqhkiG9w0BAQsFADAS\\nMRAwDgYDVQQKEwdBY21lIENvMCAXDTcwMDEwMTAwMDAwMFoYDzIwODQwMTI5MTYw\\nMDAwWjASMRAwDgYDVQQKEwdBY21lIENvMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A\\nMIIBCgKCAQEA6Gba5tHV1dAKouAaXO3/ebDUU4rvwCUg/CNaJ2PT5xLD4N1Vcb8r\\nbFSW2HXKq+MPfVdwIKR/1DczEoAGf/JWQTW7EgzlXrCd3rlajEX2D73faWJekD0U\\naUgz5vtrTXZ90BQL7WvRICd7FlEZ6FPOcPlumiyNmzUqtwGhO+9ad1W5BqJaRI6P\\nYfouNkwR6Na4TzSj5BrqUfP0FwDizKSJ0XXmh8g8G9mtwxOSN3Ru1QFc61Xyeluk\\nPOGKBV/q6RBNklTNe0gI8usUMlYyoC7ytppNMW7X2vodAelSu25jgx2anj9fDVZu\\nh7AXF5+4nJS4AAt0n1lNY7nGSsdZas8PbQIDAQABo4GIMIGFMA4GA1UdDwEB/wQE\\nAwICpDATBgNVHSUEDDAKBggrBgEFBQcDATAPBgNVHRMBAf8EBTADAQH/MB0GA1Ud\\nDgQWBBStsdjh3/JCXXYlQryOrL4Sh7BW5TAuBgNVHREEJzAlggtleGFtcGxlLmNv\\nbYcEfwAAAYcQAAAAAAAAAAAAAAAAAAAAATANBgkqhkiG9w0BAQsFAAOCAQEAxWGI\\n5NhpF3nwwy/4yB4i/CwwSpLrWUa70NyhvprUBC50PxiXav1TeDzwzLx/o5HyNwsv\\ncxv3HdkLW59i/0SlJSrNnWdfZ19oTcS+6PtLoVyISgtyN6DpkKpdG1cOkW3Cy2P2\\n+tK/tKHRP1Y/Ra0RiDpOAmqn0gCOFGz8+lqDIor/T7MTpibL3IxqWfPrvfVRHL3B\\ngrw/ZQTTIVjjh4JBSW3WyWgNo/ikC1lrVxzl4iPUGptxT36Cr7Zk2Bsg0XqwbOvK\\n5d+NTDREkSnUbie4GeutujmX3Dsx88UiV6UY/4lHJa6I5leHUNOHahRbpbWeOfs/\\nWkBKOclmOV2xlTVuPw==\\n-----END CERTIFICATE-----"
+	clientAuth := "-----BEGIN CERTIFICATE-----\\nMIIBVzCB/6ADAgECAgkAg/SeNG3XqB0wCgYIKoZIzj0EAwIwEDEOMAwGA1UEAwwF\\nTXkgQ0EwIBcNMjIwMTIxMTUxMjM0WhgPMzAyMTA1MjQxNTEyMzRaMBExDzANBgNV\\nBAMMBmNsaWVudDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABKM7OJQMYG4KLtDA\\ngZ8zOg2PimHMmQnjD2HtI4cSwIUJJnvHWLowbFe9fk6XeP9b3dK1ImUI++/EZdVr\\nABAcngejPzA9MA4GA1UdDwEB/wQEAwIBBjAMBgNVHRMBAf8EAjAAMB0GA1UdDgQW\\nBBSttJe1mcPEnBOZ6wvKPG4zL0m1CzAKBggqhkjOPQQDAgNHADBEAiBPSLgKA/r9\\nu/FW6W+oy6Odm1kdNMGCI472iTn545GwJgIgb3UQPOUTOj0IN4JLJYfmYyXviqsy\\nzk9eWNHFXDA9U6U=\\n-----END CERTIFICATE-----"
+	clientAuthKey := testingKey("-----BEGIN EC TESTING KEY-----\\nMHcCAQEEINDaMGkOT3thu1A0LfLJr3Jd011/aEG6OArmEQaujwgpoAoGCCqGSM49\\nAwEHoUQDQgAEozs4lAxgbgou0MCBnzM6DY+KYcyZCeMPYe0jhxLAhQkme8dYujBs\\nV71+Tpd4/1vd0rUiZQj778Rl1WsAEByeBw==\\n-----END EC TESTING KEY-----")
+	clientAuthKeyEncrypted := testingKey("-----BEGIN EC TESTING KEY-----\\nProc-Type: 4,ENCRYPTED\\nDEK-Info: AES-256-CBC,3E311E9B602231BFB5C752071EE7D652\\n\\nsAKeqbacug0v4ruE1A0CACwGVEGBQVOl1CiGVp5RsxgNZKXzMS6EsTTNLw378coF\\nKXbF+he05HIuzToOz2ANLXov1iCrVpotKVB4l2obTQvg+5VET902ky99Mc9Us7jd\\nUwW8LpXlSlhcNWuUfK6wyosL42TbcIxjqZWaESW+6ww=\\n-----END EC TESTING KEY-----")
+
+	trivialKeyPassword := "abc123"
+	trivialWrongKeyPassword := "abc321"
+
+	tests := []testcase{
+		{
+			name:       "ConnectTlsEmptyTlsSuccess",
+			initString: codeBlock{code: "var client = new grpc.Client();"},
+			vuString: codeBlock{
+				code: `client.connect("GRPCBIN_ADDR", { tls: { }});`,
+			},
+		},
+		{
+			name:       "ConnectTlsInvalidTlsParamCertType",
+			initString: codeBlock{code: "var client = new grpc.Client();"},
+			vuString: codeBlock{
+				code: `client.connect("GRPCBIN_ADDR", { tls: { cert: 0 }});`,
+				err:  `invalid grpc.connect() parameters: invalid tls cert value: 'map[string]interface {}{"cert":0}', it needs to be a PEM formatted string`,
+			},
+		},
+		{
+			name:       "ConnectTlsInvalidTlsParamKeyType",
+			initString: codeBlock{code: "var client = new grpc.Client();"},
+			vuString: codeBlock{
+				code: `client.connect("GRPCBIN_ADDR", { tls: { cert: "", key: 0 }});`,
+				err:  `invalid grpc.connect() parameters: invalid tls key value: 'map[string]interface {}{"cert":"", "key":0}', it needs to be a PEM formatted string`,
+			},
+		},
+		{
+			name:       "ConnectTlsInvalidTlsParamPasswordType",
+			initString: codeBlock{code: "var client = new grpc.Client();"},
+			vuString: codeBlock{
+				code: `client.connect("GRPCBIN_ADDR", { tls: { cert: "", key: "", password: 0 }});`,
+				err:  `invalid grpc.connect() parameters: invalid tls password value: 'map[string]interface {}{"cert":"", "key":"", "password":0}', it needs to be a string`,
+			},
+		},
+		{
+			name:       "ConnectTlsInvalidTlsParamCACertsType",
+			initString: codeBlock{code: "var client = new grpc.Client();"},
+			vuString: codeBlock{
+				code: `client.connect("GRPCBIN_ADDR", { tls: { cert: "", key: "", cacerts: 0 }});`,
+				err:  `invalid grpc.connect() parameters: invalid tls cacerts value: 'map[string]interface {}{"cacerts":0, "cert":"", "key":""}', it needs to be a string or an array of PEM formatted strings`,
+			},
+		},
+		{
+			name: "ConnectTls",
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				clientCAPool := x509.NewCertPool()
+				clientCAPool.AppendCertsFromPEM(clientAuthCA)
+				tb.ServerHTTP2.TLS.ClientAuth = tls.RequireAndVerifyClientCert
+				tb.ServerHTTP2.TLS.ClientCAs = clientCAPool
+			},
+			initString: codeBlock{code: "var client = new grpc.Client();"},
+			vuString:   codeBlock{code: fmt.Sprintf(`client.connect("GRPCBIN_ADDR", { tls: { cacerts: ["%s"], cert: "%s", key: "%s" }});`, localHostCert, clientAuth, clientAuthKey)},
+		},
+		{
+			name: "ConnectTlsEncryptedKey",
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				clientCAPool := x509.NewCertPool()
+				clientCAPool.AppendCertsFromPEM(clientAuthCA)
+				tb.ServerHTTP2.TLS.ClientAuth = tls.RequireAndVerifyClientCert
+				tb.ServerHTTP2.TLS.ClientCAs = clientCAPool
+			},
+			initString: codeBlock{code: "var client = new grpc.Client();"},
+			vuString:   codeBlock{code: fmt.Sprintf(`client.connect("GRPCBIN_ADDR", { tls: { cacerts: ["%s"], cert: "%s", key: "%s", password: "%s" }});`, localHostCert, clientAuth, clientAuthKeyEncrypted, trivialKeyPassword)},
+		},
+		{
+			name:       "ConnectTlsEncryptedKeyDecryptionFailed",
+			initString: codeBlock{code: "var client = new grpc.Client();"},
+			vuString: codeBlock{
+				code: fmt.Sprintf(`client.connect("GRPCBIN_ADDR", { timeout: '5s', tls: { cert: "%s", key: "%s", password: "%s" }});`,
+					clientAuth,
+					clientAuthKeyEncrypted,
+					trivialWrongKeyPassword,
+				),
+				err: "x509: decryption password incorrect",
+			},
+		},
+		{
+			name: "ConnectTlsInvokeSuccess",
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				clientCAPool := x509.NewCertPool()
+				clientCAPool.AppendCertsFromPEM(clientAuthCA)
+				tb.ServerHTTP2.TLS.ClientAuth = tls.RequireAndVerifyClientCert
+				tb.ServerHTTP2.TLS.ClientCAs = clientCAPool
+				tb.GRPCStub.EmptyCallFunc = func(context.Context, *grpc_testing.Empty) (*grpc_testing.Empty, error) {
+					return &grpc_testing.Empty{}, nil
+				}
+			},
+			initString: codeBlock{code: `
+				var client = new grpc.Client();
+				client.load([], "../../../../lib/testutils/httpmultibin/grpc_testing/test.proto");`},
+			vuString: codeBlock{
+				code: fmt.Sprintf(`
+				client.connect("GRPCBIN_ADDR", { timeout: '5s', tls: { cacerts: ["%s"], cert: "%s", key: "%s" }});
+				var resp = client.invoke("grpc.testing.TestService/EmptyCall", {})
+				if (resp.status !== grpc.StatusOK) {
+					throw new Error("unexpected error: " + JSON.stringify(resp.error) + "or status: " + resp.status)
+				}`,
+					localHostCert,
+					clientAuth,
+					clientAuthKey),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ts := newTestState(t)
+
+			// setup necessary environment if needed by a test
+			if tt.setup != nil {
+				tt.setup(ts.httpBin)
 			}
-			ts.MoveToVUContext(state)
-			val, err = replace(tt.vuString.code)
+
+			val, err := ts.Run(tt.initString.code)
+			assertResponse(t, tt.initString, err, val, ts)
+
+			ts.ToVUContext()
+			val, err = ts.Run(tt.vuString.code)
 			assertResponse(t, tt.vuString, err, val, ts)
 		})
 	}
@@ -943,37 +1362,79 @@ func TestDebugStat(t *testing.T) {
 	}
 }
 
-func TestClientInvokeHeadersDeprecated(t *testing.T) {
+func TestClientLoadProto(t *testing.T) {
 	t.Parallel()
 
-	registry := metrics.NewRegistry()
+	ts := newTestState(t)
 
-	logHook := testutils.NewLogHook(logrus.WarnLevel)
-	testLog := logrus.New()
-	testLog.AddHook(logHook)
-	testLog.SetOutput(io.Discard)
-
-	rt := goja.New()
-	c := Client{
-		vu: &modulestest.VU{
-			StateField: &lib.State{
-				BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
-				Logger:         testLog,
-				Tags:           lib.NewVUStateTags(registry.RootTagSet()),
-			},
-			RuntimeField: rt,
+	tt := testcase{
+		name: "LoadNestedTypesProto",
+		initString: codeBlock{
+			code: `
+			var client = new grpc.Client();
+			client.load([], "../../../../lib/testutils/httpmultibin/nested_types/nested_types.proto");`,
 		},
 	}
 
-	params := rt.ToValue(map[string]interface{}{
-		"headers": map[string]interface{}{
-			"X-HEADER-FOO": "bar",
-		},
-	})
-	_, err := c.parseInvokeParams(params)
-	require.NoError(t, err)
+	val, err := ts.Run(tt.initString.code)
+	assertResponse(t, tt.initString, err, val, ts)
 
-	entries := logHook.Drain()
-	require.Len(t, entries, 1)
-	require.Contains(t, entries[0].Message, "headers property is deprecated")
+	expectedTypes := []string{
+		"grpc.testdata.nested.types.Outer",
+		"grpc.testdata.nested.types.Outer.MiddleAA",
+		"grpc.testdata.nested.types.Outer.MiddleAA.Inner",
+		"grpc.testdata.nested.types.Outer.MiddleBB",
+		"grpc.testdata.nested.types.Outer.MiddleBB.Inner",
+		"grpc.testdata.nested.types.MeldOuter",
+	}
+
+	for _, expected := range expectedTypes {
+		found, err := protoregistry.GlobalTypes.FindMessageByName(protoreflect.FullName(expected))
+
+		assert.NotNil(t, found, "Expected to find the message type %s, but an error occurred", expected)
+		assert.Nil(t, err, "It was not expected that there would be an error, but it got: %v", err)
+	}
+}
+
+func TestClientConnectionReflectMetadata(t *testing.T) {
+	t.Parallel()
+
+	ts := newTestState(t)
+
+	reflection.Register(ts.httpBin.ServerGRPC)
+
+	initString := codeBlock{
+		code: `var client = new grpc.Client();`,
+	}
+	vuString := codeBlock{
+		code: `client.connect("GRPCBIN_ADDR", {reflect: true, reflectMetadata: {"x-test": "custom-header-for-reflection"}})`,
+	}
+
+	val, err := ts.Run(initString.code)
+	assertResponse(t, initString, err, val, ts)
+
+	ts.ToVUContext()
+
+	// this should trigger logging of the outgoing gRPC metadata
+	ts.VU.State().Options.HTTPDebug = null.NewString("full", true)
+
+	val, err = ts.Run(vuString.code)
+	assertResponse(t, vuString, err, val, ts)
+
+	entries := ts.loggerHook.Drain()
+
+	// since we enable debug logging, we should see the metadata in the logs
+	foundReflectionCall := false
+	for _, entry := range entries {
+		if strings.Contains(entry.Message, "ServerReflection/ServerReflectionInfo") {
+			foundReflectionCall = true
+
+			// check that the metadata is present
+			assert.Contains(t, entry.Message, "x-test: custom-header-for-reflection")
+			// check that user-agent header is present
+			assert.Contains(t, entry.Message, "user-agent: k6-test")
+		}
+	}
+
+	assert.True(t, foundReflectionCall, "expected to find a reflection call in the logs, but didn't")
 }

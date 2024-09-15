@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -47,13 +47,13 @@ func TestRequire(t *testing.T) {
 			bi, err := b.Instantiate(context.Background(), 0)
 			assert.NoError(t, err, "instance error")
 
-			_, defaultOk := goja.AssertFunction(bi.getExported("default"))
+			_, defaultOk := sobek.AssertFunction(bi.getExported("default"))
 			assert.True(t, defaultOk, "default export is not a function")
 			assert.Equal(t, "abc123", bi.getExported("dummy").String())
 
 			k6 := bi.getExported("_k6").ToObject(bi.Runtime)
 			require.NotNil(t, k6)
-			_, groupOk := goja.AssertFunction(k6.Get("group"))
+			_, groupOk := sobek.AssertFunction(k6.Get("group"))
 			assert.True(t, groupOk, "k6.group is not a function")
 		})
 
@@ -70,11 +70,11 @@ func TestRequire(t *testing.T) {
 			bi, err := b.Instantiate(context.Background(), 0)
 			require.NoError(t, err)
 
-			_, defaultOk := goja.AssertFunction(bi.getExported("default"))
+			_, defaultOk := sobek.AssertFunction(bi.getExported("default"))
 			assert.True(t, defaultOk, "default export is not a function")
 			assert.Equal(t, "abc123", bi.getExported("dummy").String())
 
-			_, groupOk := goja.AssertFunction(bi.getExported("_group"))
+			_, groupOk := sobek.AssertFunction(bi.getExported("_group"))
 			assert.True(t, groupOk, "{ group } is not a function")
 		})
 	})
@@ -93,8 +93,7 @@ func TestRequire(t *testing.T) {
 			fs := fsext.NewMemMapFs()
 			require.NoError(t, fsext.WriteFile(fs, "/file.js", []byte{0x00}, 0o755))
 			_, err := getSimpleBundle(t, "/script.js", `import "/file.js"; export default function() {}`, fs)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "SyntaxError: file:///file.js: Unexpected character '\x00' (1:0)\n> 1 | \x00\n")
+			assert.ErrorContains(t, err, "file:///file.js: Line 1:1 Unexpected token ILLEGAL (and 1 more errors)")
 		})
 		t.Run("Error", func(t *testing.T) {
 			t.Parallel()
@@ -102,7 +101,7 @@ func TestRequire(t *testing.T) {
 			require.NoError(t, fsext.WriteFile(fs, "/file.js", []byte(`throw new Error("aaaa")`), 0o755))
 			_, err := getSimpleBundle(t, "/script.js", `import "/file.js"; export default function() {}`, fs)
 			assert.EqualError(t, err,
-				"Error: aaaa\n\tat file:///file.js:2:7(3)\n\tat go.k6.io/k6/js.(*requireImpl).require-fm (native)\n\tat file:///script.js:1:0(15)\n")
+				"Error: aaaa\n\tat file:///file.js:1:34(3)\n")
 		})
 
 		imports := map[string]struct {
@@ -196,7 +195,7 @@ func TestRequire(t *testing.T) {
 
 			bi, err := b.Instantiate(context.Background(), 0)
 			require.NoError(t, err)
-			_, err = bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
+			_, err = bi.getCallableExport(consts.DefaultFn)(sobek.Undefined())
 			assert.NoError(t, err)
 		})
 	})
@@ -241,7 +240,7 @@ func TestInitContextOpen(t *testing.T) {
 		{[]byte("hello world!"), "ascii", 12},
 		{[]byte("?((¯°·._.• ţ€$ţɨɲǥ µɲɨȼ๏ď€ΣSЫ ɨɲ Ќ6 •._.·°¯))؟•"), "utf", 47},
 		{[]byte{0o44, 226, 130, 172}, "utf-8", 2}, // $€
-		//{[]byte{00, 36, 32, 127}, "utf-16", 2},   // $€
+		// {[]byte{00, 36, 32, 127}, "utf-16", 2},   // $€
 	}
 	for _, tc := range testCases {
 		tc := tc
@@ -299,7 +298,7 @@ func TestRequestWithBinaryFile(t *testing.T) {
 
 	ch := make(chan bool, 1)
 
-	h := func(w http.ResponseWriter, r *http.Request) {
+	h := func(_ http.ResponseWriter, r *http.Request) {
 		defer func() {
 			ch <- true
 		}()
@@ -342,9 +341,6 @@ func TestRequestWithBinaryFile(t *testing.T) {
 	bi, err := b.Instantiate(context.Background(), 0)
 	require.NoError(t, err)
 
-	root, err := lib.NewGroup("", nil)
-	require.NoError(t, err)
-
 	logger := logrus.New()
 	logger.Level = logrus.DebugLevel
 	logger.Out = io.Discard
@@ -354,13 +350,11 @@ func TestRequestWithBinaryFile(t *testing.T) {
 	bi.moduleVUImpl.state = &lib.State{
 		Options: lib.Options{},
 		Logger:  logger,
-		Group:   root,
 		Transport: &http.Transport{
 			DialContext: (netext.NewDialer(
 				net.Dialer{
 					Timeout:   10 * time.Second,
 					KeepAlive: 60 * time.Second,
-					DualStack: true,
 				},
 				netext.NewResolver(net.LookupIP, 0, types.DNSfirst, types.DNSpreferIPv4),
 			)).DialContext,
@@ -375,7 +369,7 @@ func TestRequestWithBinaryFile(t *testing.T) {
 	defer cancel()
 	bi.moduleVUImpl.ctx = ctx
 
-	v, err := bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
+	v, err := bi.getCallableExport(consts.DefaultFn)(sobek.Undefined())
 	require.NoError(t, err)
 	require.NotNil(t, v)
 	assert.Equal(t, true, v.Export())
@@ -388,7 +382,7 @@ func TestRequestWithMultipleBinaryFiles(t *testing.T) {
 
 	ch := make(chan bool, 1)
 
-	h := func(w http.ResponseWriter, r *http.Request) {
+	h := func(_ http.ResponseWriter, r *http.Request) {
 		defer func() {
 			ch <- true
 		}()
@@ -489,9 +483,6 @@ func TestRequestWithMultipleBinaryFiles(t *testing.T) {
 	bi, err := b.Instantiate(context.Background(), 0)
 	require.NoError(t, err)
 
-	root, err := lib.NewGroup("", nil)
-	require.NoError(t, err)
-
 	logger := logrus.New()
 	logger.Level = logrus.DebugLevel
 	logger.Out = io.Discard
@@ -501,13 +492,11 @@ func TestRequestWithMultipleBinaryFiles(t *testing.T) {
 	bi.moduleVUImpl.state = &lib.State{
 		Options: lib.Options{},
 		Logger:  logger,
-		Group:   root,
 		Transport: &http.Transport{
 			DialContext: (netext.NewDialer(
 				net.Dialer{
 					Timeout:   10 * time.Second,
 					KeepAlive: 60 * time.Second,
-					DualStack: true,
 				},
 				netext.NewResolver(net.LookupIP, 0, types.DNSfirst, types.DNSpreferIPv4),
 			)).DialContext,
@@ -522,7 +511,7 @@ func TestRequestWithMultipleBinaryFiles(t *testing.T) {
 	defer cancel()
 	bi.moduleVUImpl.ctx = ctx
 
-	v, err := bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
+	v, err := bi.getCallableExport(consts.DefaultFn)(sobek.Undefined())
 	require.NoError(t, err)
 	require.NotNil(t, v)
 	assert.Equal(t, true, v.Export())
@@ -539,7 +528,7 @@ func Test__VU(t *testing.T) {
 	require.NoError(t, err)
 	bi, err := b.Instantiate(context.Background(), 5)
 	require.NoError(t, err)
-	v, err := bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
+	v, err := bi.getCallableExport(consts.DefaultFn)(sobek.Undefined())
 	require.NoError(t, err)
 	assert.Equal(t, int64(5), v.Export())
 }
@@ -571,11 +560,45 @@ export default function(){
 
 	bi, err := b.Instantiate(context.Background(), 0)
 	require.NoError(t, err)
-	_, err = bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
+	_, err = bi.getCallableExport(consts.DefaultFn)(sobek.Undefined())
 	require.Error(t, err)
-	exception := new(goja.Exception)
+	exception := new(sobek.Exception)
 	require.ErrorAs(t, err, &exception)
-	require.Equal(t, exception.String(), "exception in line 2\n\tat f2 (file:///module1.js:2:4(2))\n\tat file:///script.js:5:4(3)\n")
+	require.Equal(t, exception.String(), "exception in line 2\n\tat f2 (file:///module1.js:2:5(2))\n\tat default (file:///script.js:5:15(3))\n")
+}
+
+func TestSourceMapsCJS(t *testing.T) {
+	t.Parallel()
+	fs := fsext.NewMemMapFs()
+	require.NoError(t, fsext.WriteFile(fs, "/module1.js", []byte(`
+exports.f2 = function(){
+    throw "exception in line 2"
+    console.log("in f2")
+}
+exports.f1 = function(){
+    throw "exception in line 6"
+    console.log("in f1")
+}
+`[1:]), 0o644))
+	data := `
+import * as module1 from "./module1.js"
+
+export default function(){
+//    throw "exception in line 4"
+    module1.f2()
+    console.log("in default")
+}
+`[1:]
+	b, err := getSimpleBundle(t, "/script.js", data, fs)
+	require.NoError(t, err)
+
+	bi, err := b.Instantiate(context.Background(), 0)
+	require.NoError(t, err)
+	_, err = bi.getCallableExport(consts.DefaultFn)(sobek.Undefined())
+	require.Error(t, err)
+	exception := new(sobek.Exception)
+	require.ErrorAs(t, err, &exception)
+	require.Equal(t, exception.String(), "exception in line 2\n\tat file:///module1.js:2:5(2)\n\tat default (file:///script.js:5:15(3))\n")
 }
 
 func TestSourceMapsExternal(t *testing.T) {
@@ -601,74 +624,81 @@ export default function () {
 
 	bi, err := b.Instantiate(context.Background(), 0)
 	require.NoError(t, err)
-	_, err = bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
+	_, err = bi.getCallableExport(consts.DefaultFn)(sobek.Undefined())
 	require.Error(t, err)
-	exception := new(goja.Exception)
+	exception := new(sobek.Exception)
 	require.ErrorAs(t, err, &exception)
-	require.Equal(t, "cool is cool\n\tat webpack:///./test1.ts:2:4(2)\n\tat webpack:///./test1.ts:5:4(3)\n\tat file:///script.js:4:2(4)\n", exception.String())
+	require.Equal(t, "cool is cool\n\tat webpack:///./test1.ts:2:4(2)\n\tat webpack:///./test1.ts:5:4(3)\n\tat default (file:///script.js:4:4(3))\n", exception.String())
 }
 
-func TestSourceMapsExternalExtented(t *testing.T) {
+func TestSourceMapsInlinedCJS(t *testing.T) {
 	t.Parallel()
 	fs := fsext.NewMemMapFs()
-	// This example is created through the template-typescript
-	// but was exported to use import/export syntax so it has to go through babel
-	require.NoError(t, fsext.WriteFile(fs, "/test1.js", []byte(`
-var o={d:(e,r)=>{for(var t in r)o.o(r,t)&&!o.o(e,t)&&Object.defineProperty(e,t,{enumerable:!0,get:r[t]})},o:(o,e)=>Object.prototype.hasOwnProperty.call(o,e)},e={};o.d(e,{Z:()=>r});const r=()=>{!function(o){throw"cool is cool"}()};var t=e.Z;export{t as default};
-//# sourceMappingURL=test1.js.map
-`[1:]), 0o644))
-	require.NoError(t, fsext.WriteFile(fs, "/test1.js.map", []byte(`
-{"version":3,"sources":["webpack:///webpack/bootstrap","webpack:///webpack/runtime/define property getters","webpack:///webpack/runtime/hasOwnProperty shorthand","webpack:///./test1.ts"],"names":["__webpack_require__","exports","definition","key","o","Object","defineProperty","enumerable","get","obj","prop","prototype","hasOwnProperty","call","s","coolThrow"],"mappings":"AACA,IAAIA,EAAsB,CCA1B,EAAwB,CAACC,EAASC,KACjC,IAAI,IAAIC,KAAOD,EACXF,EAAoBI,EAAEF,EAAYC,KAASH,EAAoBI,EAAEH,EAASE,IAC5EE,OAAOC,eAAeL,EAASE,EAAK,CAAEI,YAAY,EAAMC,IAAKN,EAAWC,MCJ3E,EAAwB,CAACM,EAAKC,IAAUL,OAAOM,UAAUC,eAAeC,KAAKJ,EAAKC,I,sBCGlF,cAHA,SAAmBI,GACf,KAAM,eAGNC,I","file":"test1.js","sourcesContent":["// The require scope\nvar __webpack_require__ = {};\n\n","// define getter functions for harmony exports\n__webpack_require__.d = (exports, definition) => {\n\tfor(var key in definition) {\n\t\tif(__webpack_require__.o(definition, key) && !__webpack_require__.o(exports, key)) {\n\t\t\tObject.defineProperty(exports, key, { enumerable: true, get: definition[key] });\n\t\t}\n\t}\n};","__webpack_require__.o = (obj, prop) => (Object.prototype.hasOwnProperty.call(obj, prop))","function coolThrow(s: string) {\n    throw \"cool \"+ s\n}\nexport default () => {\n    coolThrow(\"is cool\")\n};\n"],"sourceRoot":""}
-`[1:]), 0o644))
+	// this example is from https://github.com/grafana/k6/issues/3689 generated with k6pack
 	data := `
-import l from "./test1.js"
-
-export default function () {
-		l()
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
 };
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+var __publicField = (obj, key, value) => {
+  __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
+  return value;
+};
+
+// script.ts
+var script_exports = {};
+__export(script_exports, {
+  default: () => script_default
+});
+module.exports = __toCommonJS(script_exports);
+
+// user.ts
+var UserAccount = class {
+  constructor(name) {
+    __publicField(this, "name");
+    __publicField(this, "id");
+    this.name = name;
+    this.id = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+    throw "ooops";
+  }
+};
+function newUser(name) {
+  return new UserAccount(name);
+}
+
+// script.ts
+var script_default = () => {
+  const user = newUser("John");
+  console.log(user);
+};
+//# sourceMappingURL=data:application/json;base64,ewogICJ2ZXJzaW9uIjogMywKICAic291cmNlcyI6IFsic2NyaXB0LnRzIiwgInVzZXIudHMiXSwKICAic291cmNlc0NvbnRlbnQiOiBbImltcG9ydCB7IFVzZXIsIG5ld1VzZXIgfSBmcm9tIFwiLi91c2VyXCI7XG5cbmV4cG9ydCBkZWZhdWx0ICgpID0+IHtcbiAgY29uc3QgdXNlcjogVXNlciA9IG5ld1VzZXIoXCJKb2huXCIpO1xuICBjb25zb2xlLmxvZyh1c2VyKTtcbn07XG4iLCAiaW50ZXJmYWNlIFVzZXIge1xuICBuYW1lOiBzdHJpbmc7XG4gIGlkOiBudW1iZXI7XG59XG5cbmNsYXNzIFVzZXJBY2NvdW50IGltcGxlbWVudHMgVXNlciB7XG4gIG5hbWU6IHN0cmluZztcbiAgaWQ6IG51bWJlcjtcblxuICBjb25zdHJ1Y3RvcihuYW1lOiBzdHJpbmcpIHtcbiAgICB0aGlzLm5hbWUgPSBuYW1lO1xuICAgIHRoaXMuaWQgPSBNYXRoLmZsb29yKE1hdGgucmFuZG9tKCkgKiBOdW1iZXIuTUFYX1NBRkVfSU5URUdFUik7XG4gICAgdGhyb3cgXCJvb29wc1wiO1xuICB9XG59XG5cbmZ1bmN0aW9uIG5ld1VzZXIobmFtZTogc3RyaW5nKTogVXNlciB7XG4gIHJldHVybiBuZXcgVXNlckFjY291bnQobmFtZSk7XG59XG5cbmV4cG9ydCB7IFVzZXIsIG5ld1VzZXIgfTtcbiJdLAogICJtYXBwaW5ncyI6ICI7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7OztBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7OztBQ0tBLElBQU0sY0FBTixNQUFrQztBQUFBLEVBSWhDLFlBQVksTUFBYztBQUgxQjtBQUNBO0FBR0UsU0FBSyxPQUFPO0FBQ1osU0FBSyxLQUFLLEtBQUssTUFBTSxLQUFLLE9BQU8sSUFBSSxPQUFPLGdCQUFnQjtBQUM1RCxVQUFNO0FBQUEsRUFDUjtBQUNGO0FBRUEsU0FBUyxRQUFRLE1BQW9CO0FBQ25DLFNBQU8sSUFBSSxZQUFZLElBQUk7QUFDN0I7OztBRGhCQSxJQUFPLGlCQUFRLE1BQU07QUFDbkIsUUFBTSxPQUFhLFFBQVEsTUFBTTtBQUNqQyxVQUFRLElBQUksSUFBSTtBQUNsQjsiLAogICJuYW1lcyI6IFtdCn0K
 `[1:]
 	b, err := getSimpleBundle(t, "/script.js", data, fs)
 	require.NoError(t, err)
 
 	bi, err := b.Instantiate(context.Background(), 0)
 	require.NoError(t, err)
-	_, err = bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
+	_, err = bi.getCallableExport(consts.DefaultFn)(sobek.Undefined())
 	require.Error(t, err)
-	exception := new(goja.Exception)
+	exception := new(sobek.Exception)
 	require.ErrorAs(t, err, &exception)
 	// TODO figure out why those are not the same as the one in the previous test TestSourceMapsExternal
 	// likely settings in the transpilers
-	require.Equal(t, "cool is cool\n\tat webpack:///./test1.ts:2:4(2)\n\tat r (webpack:///./test1.ts:5:4(3))\n\tat file:///script.js:4:2(4)\n", exception.String())
-}
-
-func TestSourceMapsExternalExtentedInlined(t *testing.T) {
-	t.Parallel()
-	fs := fsext.NewMemMapFs()
-	// This example is created through the template-typescript
-	// but was exported to use import/export syntax so it has to go through babel
-	require.NoError(t, fsext.WriteFile(fs, "/test1.js", []byte(`
-var o={d:(e,r)=>{for(var t in r)o.o(r,t)&&!o.o(e,t)&&Object.defineProperty(e,t,{enumerable:!0,get:r[t]})},o:(o,e)=>Object.prototype.hasOwnProperty.call(o,e)},e={};o.d(e,{Z:()=>r});const r=()=>{!function(o){throw"cool is cool"}()};var t=e.Z;export{t as default};
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIndlYnBhY2s6Ly8vd2VicGFjay9ib290c3RyYXAiLCJ3ZWJwYWNrOi8vL3dlYnBhY2svcnVudGltZS9kZWZpbmUgcHJvcGVydHkgZ2V0dGVycyIsIndlYnBhY2s6Ly8vd2VicGFjay9ydW50aW1lL2hhc093blByb3BlcnR5IHNob3J0aGFuZCIsIndlYnBhY2s6Ly8vLi90ZXN0MS50cyJdLCJuYW1lcyI6WyJfX3dlYnBhY2tfcmVxdWlyZV9fIiwiZXhwb3J0cyIsImRlZmluaXRpb24iLCJrZXkiLCJvIiwiT2JqZWN0IiwiZGVmaW5lUHJvcGVydHkiLCJlbnVtZXJhYmxlIiwiZ2V0Iiwib2JqIiwicHJvcCIsInByb3RvdHlwZSIsImhhc093blByb3BlcnR5IiwiY2FsbCIsInMiLCJjb29sVGhyb3ciXSwibWFwcGluZ3MiOiJBQUNBLElBQUlBLEVBQXNCLENDQTFCLEVBQXdCLENBQUNDLEVBQVNDLEtBQ2pDLElBQUksSUFBSUMsS0FBT0QsRUFDWEYsRUFBb0JJLEVBQUVGLEVBQVlDLEtBQVNILEVBQW9CSSxFQUFFSCxFQUFTRSxJQUM1RUUsT0FBT0MsZUFBZUwsRUFBU0UsRUFBSyxDQUFFSSxZQUFZLEVBQU1DLElBQUtOLEVBQVdDLE1DSjNFLEVBQXdCLENBQUNNLEVBQUtDLElBQVVMLE9BQU9NLFVBQVVDLGVBQWVDLEtBQUtKLEVBQUtDLEksc0JDR2xGLGNBSEEsU0FBbUJJLEdBQ2YsS0FBTSxlQUdOQyxJIiwiZmlsZSI6InRlc3QxLmpzIiwic291cmNlc0NvbnRlbnQiOlsiLy8gVGhlIHJlcXVpcmUgc2NvcGVcbnZhciBfX3dlYnBhY2tfcmVxdWlyZV9fID0ge307XG5cbiIsIi8vIGRlZmluZSBnZXR0ZXIgZnVuY3Rpb25zIGZvciBoYXJtb255IGV4cG9ydHNcbl9fd2VicGFja19yZXF1aXJlX18uZCA9IChleHBvcnRzLCBkZWZpbml0aW9uKSA9PiB7XG5cdGZvcih2YXIga2V5IGluIGRlZmluaXRpb24pIHtcblx0XHRpZihfX3dlYnBhY2tfcmVxdWlyZV9fLm8oZGVmaW5pdGlvbiwga2V5KSAmJiAhX193ZWJwYWNrX3JlcXVpcmVfXy5vKGV4cG9ydHMsIGtleSkpIHtcblx0XHRcdE9iamVjdC5kZWZpbmVQcm9wZXJ0eShleHBvcnRzLCBrZXksIHsgZW51bWVyYWJsZTogdHJ1ZSwgZ2V0OiBkZWZpbml0aW9uW2tleV0gfSk7XG5cdFx0fVxuXHR9XG59OyIsIl9fd2VicGFja19yZXF1aXJlX18ubyA9IChvYmosIHByb3ApID0+IChPYmplY3QucHJvdG90eXBlLmhhc093blByb3BlcnR5LmNhbGwob2JqLCBwcm9wKSkiLCJmdW5jdGlvbiBjb29sVGhyb3coczogc3RyaW5nKSB7XG4gICAgdGhyb3cgXCJjb29sIFwiKyBzXG59XG5leHBvcnQgZGVmYXVsdCAoKSA9PiB7XG4gICAgY29vbFRocm93KFwiaXMgY29vbFwiKVxufTtcbiJdLCJzb3VyY2VSb290IjoiIn0=
-`[1:]), 0o644))
-	data := `
-import l from "./test1.js"
-
-export default function () {
-		l()
-};
-`[1:]
-	b, err := getSimpleBundle(t, "/script.js", data, fs)
-	require.NoError(t, err)
-
-	bi, err := b.Instantiate(context.Background(), 0)
-	require.NoError(t, err)
-	_, err = bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
-	require.Error(t, err)
-	exception := new(goja.Exception)
-	require.ErrorAs(t, err, &exception)
-	// TODO figure out why those are not the same as the one in the previous test TestSourceMapsExternal
-	// likely settings in the transpilers
-	require.Equal(t, "cool is cool\n\tat webpack:///./test1.ts:2:4(2)\n\tat r (webpack:///./test1.ts:5:4(3))\n\tat file:///script.js:4:2(4)\n", exception.String())
+	require.Equal(t, "ooops\n\tat file:///user.ts:13:4(28)\n\tat newUser (file:///user.ts:18:9(3))\n\tat script_default (file:///script.ts:4:29(4))\n", exception.String())
 }
 
 func TestImportModificationsAreConsistentBetweenFiles(t *testing.T) {

@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -18,8 +19,9 @@ import (
 // TODO?: Discard? Or make this actually user-configurable somehow? hello #883...
 var DefaultGracefulStopValue = 30 * time.Second //nolint:gochecknoglobals
 
-var executorNameWhitelist = regexp.MustCompile(`^[0-9a-zA-Z_-]+$`) //nolint:gochecknoglobals
-const executorNameErr = "the executor name should contain only numbers, latin letters, underscores, and dashes"
+var scenarioNameWhitelist = regexp.MustCompile(`^[0-9a-zA-Z_-]+$`)
+
+const scenarioNameErr = "the scenario name should contain only numbers, latin letters, underscores, and dashes"
 
 // BaseConfig contains the common config fields for all executors
 type BaseConfig struct {
@@ -45,32 +47,32 @@ func NewBaseConfig(name, configType string) BaseConfig {
 }
 
 // Validate checks some basic things like present name, type, and a positive start time
-func (bc BaseConfig) Validate() (errors []error) {
+func (bc BaseConfig) Validate() (result []error) {
 	// Some just-in-case checks, since those things are likely checked in other places or
 	// even assigned by us:
 	if bc.Name == "" {
-		errors = append(errors, fmt.Errorf("executor name can't be empty"))
+		result = append(result, errors.New("scenario name can't be empty"))
 	}
-	if !executorNameWhitelist.MatchString(bc.Name) {
-		errors = append(errors, fmt.Errorf(executorNameErr))
+	if !scenarioNameWhitelist.MatchString(bc.Name) {
+		result = append(result, errors.New(scenarioNameErr))
 	}
 	if bc.Exec.Valid && bc.Exec.String == "" {
-		errors = append(errors, fmt.Errorf("exec value cannot be empty"))
+		result = append(result, errors.New("exec value cannot be empty"))
 	}
 	if bc.Type == "" {
-		errors = append(errors, fmt.Errorf("missing or empty type field"))
+		result = append(result, errors.New("missing or empty type field"))
 	}
 	// The actually reasonable checks:
 	if bc.StartTime.Duration < 0 {
-		errors = append(errors, fmt.Errorf("the startTime can't be negative"))
+		result = append(result, errors.New("the startTime can't be negative"))
 	}
 	if bc.GracefulStop.Duration < 0 {
-		errors = append(errors, fmt.Errorf("the gracefulStop timeout can't be negative"))
+		result = append(result, errors.New("the gracefulStop timeout can't be negative"))
 	}
-	return errors
+	return result
 }
 
-// GetName returns the name of the executor.
+// GetName returns the name of the scenario.
 func (bc BaseConfig) GetName() string {
 	return bc.Name
 }
@@ -116,7 +118,7 @@ func (bc BaseConfig) GetScenarioOptions() *lib.ScenarioOptions {
 	return bc.Options
 }
 
-// GetTags returns any custom tags configured for the executor.
+// GetTags returns any custom tags configured for the scenario.
 func (bc BaseConfig) GetTags() map[string]string {
 	return bc.Tags
 }

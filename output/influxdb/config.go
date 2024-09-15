@@ -14,9 +14,11 @@ import (
 	"go.k6.io/k6/lib/types"
 )
 
+// Config represents a k6's influxdb output configuration.
 type Config struct {
 	// Connection.
 	Addr             null.String        `json:"addr" envconfig:"K6_INFLUXDB_ADDR"`
+	Proxy            null.String        `json:"proxy,omitempty" envconfig:"K6_INFLUXDB_PROXY"`
 	Username         null.String        `json:"username,omitempty" envconfig:"K6_INFLUXDB_USERNAME"`
 	Password         null.String        `json:"password,omitempty" envconfig:"K6_INFLUXDB_PASSWORD"`
 	Insecure         null.Bool          `json:"insecure,omitempty" envconfig:"K6_INFLUXDB_INSECURE"`
@@ -53,9 +55,13 @@ func NewConfig() Config {
 	return c
 }
 
+// Apply applies a valid config options to the receiver.
 func (c Config) Apply(cfg Config) Config {
 	if cfg.Addr.Valid {
 		c.Addr = cfg.Addr
+	}
+	if cfg.Proxy.Valid {
+		c.Proxy = cfg.Proxy
 	}
 	if cfg.Username.Valid {
 		c.Username = cfg.Username

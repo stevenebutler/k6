@@ -16,13 +16,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"golang.org/x/time/rate"
 
 	"go.k6.io/k6/errext"
 	"go.k6.io/k6/errext/exitcodes"
+	"go.k6.io/k6/event"
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/eventloop"
 	"go.k6.io/k6/lib"
@@ -43,10 +44,10 @@ var _ lib.Runner = &Runner{}
 //nolint:gochecknoglobals
 var nameToCertWarning sync.Once
 
+// Runner implements [lib.Runner] and is used to run js tests
 type Runner struct {
 	Bundle       *Bundle
 	preInitState *lib.TestPreInitState
-	defaultGroup *lib.Group
 
 	BaseDialer net.Dialer
 	Resolver   netext.Resolver
@@ -82,20 +83,13 @@ func NewFromArchive(piState *lib.TestPreInitState, arc *lib.Archive) (*Runner, e
 
 // NewFromBundle returns a new Runner from the provided Bundle
 func NewFromBundle(piState *lib.TestPreInitState, b *Bundle) (*Runner, error) {
-	defaultGroup, err := lib.NewGroup("", nil)
-	if err != nil {
-		return nil, err
-	}
-
 	defDNS := types.DefaultDNSConfig()
 	r := &Runner{
 		Bundle:       b,
 		preInitState: piState,
-		defaultGroup: defaultGroup,
 		BaseDialer: net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
-			DualStack: true,
 		},
 		console: newConsole(piState.Logger),
 		Resolver: netext.NewResolver(
@@ -104,11 +98,13 @@ func NewFromBundle(piState *lib.TestPreInitState, b *Bundle) (*Runner, error) {
 		BufferPool:     lib.NewBufferPool(),
 	}
 
-	err = r.SetOptions(r.Bundle.Options)
+	err := r.SetOptions(r.Bundle.Options)
 
 	return r, err
 }
 
+// MakeArchive creates an Archive of the runner. There should be a corresponding NewFromArchive() function
+// that will restore the runner from the archive.
 func (r *Runner) MakeArchive() *lib.Archive {
 	return r.Bundle.makeArchive()
 }
@@ -192,7 +188,6 @@ func (r *Runner) newVU(
 					"deprecation - https://pkg.go.dev/crypto/tls@go1.17#Config.",
 			)
 		})
-		//nolint:staticcheck // ignore SA1019 we can deprecate it but we have to continue to support the previous code.
 		tlsConfig.NameToCertificate = nameToCert
 	}
 	transport := &http.Transport{
@@ -245,18 +240,12 @@ func (r *Runner) newVU(
 		VUIDGlobal:     vu.IDGlobal,
 		Samples:        vu.Samples,
 		Tags:           lib.NewVUStateTags(vu.Runner.RunTags),
-		Group:          r.defaultGroup,
 		BuiltinMetrics: r.preInitState.BuiltinMetrics,
+		TracerProvider: r.preInitState.TracerProvider,
+		Usage:          r.preInitState.Usage,
 	}
 	vu.moduleVUImpl.state = vu.state
 	_ = vu.Runtime.Set("console", vu.Console)
-
-	// This is here mostly so if someone tries they get a nice message
-	// instead of "Value is not an object: undefined  ..."
-	_ = vu.Runtime.GlobalObject().Set("open",
-		func() {
-			common.Throw(vu.Runtime, fmt.Errorf(cantBeUsedOutsideInitContextMsg, "open"))
-		})
 
 	return vu, nil
 }
@@ -299,7 +288,7 @@ func (r *Runner) Setup(ctx context.Context, out chan<- metrics.SampleContainer) 
 		return err
 	}
 	// r.setupData = nil is special it means undefined from this moment forward
-	if goja.IsUndefined(v) {
+	if sobek.IsUndefined(v) {
 		r.setupData = nil
 		return nil
 	}
@@ -341,16 +330,13 @@ func (r *Runner) Teardown(ctx context.Context, out chan<- metrics.SampleContaine
 			return fmt.Errorf("error unmarshaling setup data for teardown() from JSON: %w", err)
 		}
 	} else {
-		data = goja.Undefined()
+		data = sobek.Undefined()
 	}
 	_, err := r.runPart(teardownCtx, out, consts.TeardownFn, data)
 	return err
 }
 
-func (r *Runner) GetDefaultGroup() *lib.Group {
-	return r.defaultGroup
-}
-
+// GetOptions returns the currently calculated [lib.Options] for the given Runner.
 func (r *Runner) GetOptions() lib.Options {
 	return r.Bundle.Options
 }
@@ -370,7 +356,7 @@ func (r *Runner) HandleSummary(ctx context.Context, summary *lib.Summary) (map[s
 	defer close(out)
 
 	go func() { // discard all metrics
-		for range out {
+		for range out { //nolint:revive
 		}
 	}()
 
@@ -382,47 +368,46 @@ func (r *Runner) HandleSummary(ctx context.Context, summary *lib.Summary) (map[s
 		return nil, err
 	}
 
-	handleSummaryFn := goja.Undefined()
-	fn := vu.getExported(consts.HandleSummaryFn)
-	if _, ok := goja.AssertFunction(fn); ok {
-		handleSummaryFn = fn
-	} else if fn != nil {
-		return nil, fmt.Errorf("exported identifier %s must be a function", consts.HandleSummaryFn)
-	}
-
 	go func() {
 		<-summaryCtx.Done()
 		vu.Runtime.Interrupt(context.Canceled)
 	}()
 	vu.moduleVUImpl.ctx = summaryCtx
 
+	callbackResult := sobek.Undefined()
+	fn := vu.getExported(consts.HandleSummaryFn)
+	if fn != nil {
+		handleSummaryFn, ok := sobek.AssertFunction(fn)
+		if !ok {
+			return nil, fmt.Errorf("exported identifier %s must be a function", consts.HandleSummaryFn)
+		}
+
+		callbackResult, _, _, err = vu.runFn(summaryCtx, false, handleSummaryFn, nil, vu.Runtime.ToValue(summaryDataForJS))
+		if err != nil {
+			errText, fields := errext.Format(err)
+			r.preInitState.Logger.WithFields(fields).Error(errText)
+		}
+	}
+
 	wrapper := strings.Replace(summaryWrapperLambdaCode, "/*JSLIB_SUMMARY_CODE*/", jslibSummaryCode, 1)
 	handleSummaryWrapperRaw, err := vu.Runtime.RunString(wrapper)
 	if err != nil {
 		return nil, fmt.Errorf("unexpected error while getting the summary wrapper: %w", err)
 	}
-	handleSummaryWrapper, ok := goja.AssertFunction(handleSummaryWrapperRaw)
+	handleSummaryWrapper, ok := sobek.AssertFunction(handleSummaryWrapperRaw)
 	if !ok {
 		return nil, fmt.Errorf("unexpected error did not get a callable summary wrapper")
 	}
 
-	wrapperArgs := []goja.Value{
-		handleSummaryFn,
+	wrapperArgs := []sobek.Value{
+		callbackResult,
 		vu.Runtime.ToValue(r.Bundle.preInitState.RuntimeOptions.SummaryExport.String),
 		vu.Runtime.ToValue(summaryDataForJS),
 	}
 	rawResult, _, _, err := vu.runFn(summaryCtx, false, handleSummaryWrapper, nil, wrapperArgs...)
 
-	// TODO: refactor the whole JS runner to avoid copy-pasting these complicated bits...
-	// deadline is reached so we have timeouted but this might've not been registered correctly
-	if deadline, ok := summaryCtx.Deadline(); ok && time.Now().After(deadline) {
-		// we could have an error that is not context.Canceled in which case we should return it instead
-		if err, ok := err.(*goja.InterruptedError); ok && rawResult != nil && err.Value() != context.Canceled {
-			// TODO: silence this error?
-			return nil, err
-		}
-		// otherwise we have timeouted
-		return nil, newTimeoutError(consts.HandleSummaryFn, r.getTimeoutFor(consts.HandleSummaryFn))
+	if deadlineError := r.checkDeadline(summaryCtx, consts.HandleSummaryFn, rawResult, err); deadlineError != nil {
+		return nil, deadlineError
 	}
 
 	if err != nil {
@@ -431,6 +416,23 @@ func (r *Runner) HandleSummary(ctx context.Context, summary *lib.Summary) (map[s
 	return getSummaryResult(rawResult)
 }
 
+func (r *Runner) checkDeadline(ctx context.Context, name string, result sobek.Value, err error) error {
+	if deadline, ok := ctx.Deadline(); !(ok && time.Now().After(deadline)) {
+		return nil
+	}
+
+	// deadline is reached so we have timeouted but this might've not been registered correctly
+	// we could have an error that is not context.Canceled in which case we should return it instead
+	//nolint:errorlint
+	if err, ok := err.(*sobek.InterruptedError); ok && result != nil && err.Value() != context.Canceled {
+		// TODO: silence this error?
+		return err
+	}
+	// otherwise we have timeouted
+	return newTimeoutError(name, r.getTimeoutFor(name))
+}
+
+// SetOptions sets the test Options to the provided data and makes necessary changes to the Runner.
 func (r *Runner) SetOptions(opts lib.Options) error {
 	r.Bundle.Options = opts
 	r.RPSLimit = nil
@@ -444,10 +446,12 @@ func (r *Runner) SetOptions(opts lib.Options) error {
 		// TODO: fix logger hack, see https://github.com/grafana/k6/issues/2958
 		// and https://github.com/grafana/k6/issues/2968
 		var formatter logrus.Formatter = &logrus.JSONFormatter{}
+		level := logrus.InfoLevel
 		if l, ok := r.preInitState.Logger.(*logrus.Logger); ok { //nolint: forbidigo
 			formatter = l.Formatter
+			level = l.Level
 		}
-		c, err := newFileConsole(opts.ConsoleOutput.String, formatter)
+		c, err := newFileConsole(opts.ConsoleOutput.String, formatter, level)
 		if err != nil {
 			return err
 		}
@@ -523,17 +527,17 @@ func (r *Runner) runPart(
 	out chan<- metrics.SampleContainer,
 	name string,
 	arg interface{},
-) (goja.Value, error) {
+) (sobek.Value, error) {
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
 	vu, err := r.newVU(ctx, 0, 0, out)
 	if err != nil {
-		return goja.Undefined(), err
+		return sobek.Undefined(), err
 	}
-	fn, ok := goja.AssertFunction(vu.getExported(name))
+	fn, ok := sobek.AssertFunction(vu.getExported(name))
 	if !ok {
-		return goja.Undefined(), nil
+		return sobek.Undefined(), nil
 	}
 
 	go func() {
@@ -542,41 +546,33 @@ func (r *Runner) runPart(
 	}()
 	vu.moduleVUImpl.ctx = ctx
 
-	group, err := r.GetDefaultGroup().Group(name)
+	groupPath, err := lib.NewGroupPath(lib.RootGroupPath, name)
 	if err != nil {
-		return goja.Undefined(), err
+		return sobek.Undefined(), err
 	}
 
 	if r.Bundle.Options.SystemTags.Has(metrics.TagGroup) {
 		vu.state.Tags.Modify(func(tagsAndMeta *metrics.TagsAndMeta) {
-			tagsAndMeta.SetSystemTagOrMeta(metrics.TagGroup, group.Path)
+			tagsAndMeta.SetSystemTagOrMeta(metrics.TagGroup, groupPath)
 		})
 	}
-	vu.state.Group = group
 	v, _, _, err := vu.runFn(ctx, false, fn, nil, vu.Runtime.ToValue(arg))
 
-	// deadline is reached so we have timeouted but this might've not been registered correctly
-	if deadline, ok := ctx.Deadline(); ok && time.Now().After(deadline) {
-		// we could have an error that is not context.Canceled in which case we should return it instead
-		if err, ok := err.(*goja.InterruptedError); ok && v != nil && err.Value() != context.Canceled {
-			// TODO: silence this error?
-			return v, err
-		}
-		// otherwise we have timeouted
-		return v, newTimeoutError(name, r.getTimeoutFor(name))
+	if deadlineError := r.checkDeadline(ctx, name, v, err); deadlineError != nil {
+		return nil, deadlineError
 	}
 
 	return v, err
 }
 
 //nolint:gochecknoglobals
-var gojaPromiseType = reflect.TypeOf((*goja.Promise)(nil))
+var sobekPromiseType = reflect.TypeOf((*sobek.Promise)(nil))
 
 // unPromisify gets the result of v if it is a promise, otherwise returns v
-func unPromisify(v goja.Value) goja.Value {
+func unPromisify(v sobek.Value) sobek.Value {
 	if !common.IsNullish(v) {
-		if v.ExportType() == gojaPromiseType {
-			p, ok := v.Export().(*goja.Promise)
+		if v.ExportType() == sobekPromiseType {
+			p, ok := v.Export().(*sobek.Promise)
 			if !ok {
 				panic("Something that was promise did not export to a promise; this shouldn't happen")
 			}
@@ -601,6 +597,7 @@ func (r *Runner) getTimeoutFor(stage string) time.Duration {
 	return d
 }
 
+// VU implements the [lib.VU] interface for the js [Runner].
 type VU struct {
 	BundleInstance
 
@@ -618,7 +615,7 @@ type VU struct {
 
 	Samples chan<- metrics.SampleContainer
 
-	setupData goja.Value
+	setupData sobek.Value
 
 	state *lib.State
 	// count of iterations executed by this VU in each scenario
@@ -663,6 +660,7 @@ func (u *VU) Activate(params *lib.VUActivationParams) lib.ActiveVU {
 	for key, value := range params.Env {
 		env[key] = value
 	}
+	//nolint:errcheck,gosec // see https://github.com/grafana/k6/issues/1722#issuecomment-1761173634
 	u.Runtime.Set("__ENV", env)
 
 	opts := u.Runner.Bundle.Options
@@ -680,7 +678,7 @@ func (u *VU) Activate(params *lib.VUActivationParams) lib.ActiveVU {
 		if opts.SystemTags.Has(metrics.TagIter) {
 			tagsAndMeta.SetSystemTagOrMeta(metrics.TagIter, strconv.FormatInt(u.iteration, 10))
 		}
-		tagsAndMeta.SetSystemTagOrMetaIfEnabled(opts.SystemTags, metrics.TagGroup, u.state.Group.Path)
+		tagsAndMeta.SetSystemTagOrMetaIfEnabled(opts.SystemTags, metrics.TagGroup, lib.RootGroupPath)
 		tagsAndMeta.SetSystemTagOrMetaIfEnabled(opts.SystemTags, metrics.TagScenario, params.Scenario)
 	})
 
@@ -747,7 +745,7 @@ func (u *ActiveVU) RunOnce() error {
 			}
 			u.setupData = u.Runtime.ToValue(data)
 		} else {
-			u.setupData = goja.Undefined()
+			u.setupData = sobek.Undefined()
 		}
 	}
 
@@ -759,23 +757,35 @@ func (u *ActiveVU) RunOnce() error {
 
 	u.incrIteration()
 	if err := u.Runtime.Set("__ITER", u.iteration); err != nil {
-		panic(fmt.Errorf("error setting __ITER in goja runtime: %w", err))
+		panic(fmt.Errorf("error setting __ITER in Sobek runtime: %w", err))
 	}
 
 	ctx, cancel := context.WithCancel(u.RunContext)
 	defer cancel()
 	u.moduleVUImpl.ctx = ctx
+
+	eventIterData := event.IterData{
+		Iteration:    u.iteration,
+		VUID:         u.ID,
+		ScenarioName: u.scenarioName,
+	}
+
+	u.emitAndWaitEvent(&event.Event{Type: event.IterStart, Data: eventIterData})
+
 	// Call the exported function.
 	_, isFullIteration, totalTime, err := u.runFn(ctx, true, fn, cancel, u.setupData)
 	if err != nil {
-		var x *goja.InterruptedError
+		var x *sobek.InterruptedError
 		if errors.As(err, &x) {
 			if v, ok := x.Value().(*errext.InterruptError); ok {
 				v.Reason = x.Error()
 				err = v
 			}
 		}
+		eventIterData.Error = err
 	}
+
+	u.emitAndWaitEvent(&event.Event{Type: event.IterEnd, Data: eventIterData})
 
 	// If MinIterationDuration is specified and the iteration wasn't canceled
 	// and was less than it, sleep for the remainder
@@ -792,19 +802,28 @@ func (u *ActiveVU) RunOnce() error {
 	return err
 }
 
-func (u *VU) getExported(name string) goja.Value {
+func (u *ActiveVU) emitAndWaitEvent(evt *event.Event) {
+	waitDone := u.moduleVUImpl.events.local.Emit(evt)
+	waitCtx, waitCancel := context.WithTimeout(u.RunContext, 30*time.Minute)
+	defer waitCancel()
+	if werr := waitDone(waitCtx); werr != nil {
+		u.state.Logger.WithError(werr).Warn()
+	}
+}
+
+func (u *VU) getExported(name string) sobek.Value {
 	return u.BundleInstance.getExported(name)
 }
 
 // if isDefault is true, cancel also needs to be provided and it should cancel the provided context
 // TODO remove the need for the above through refactoring of this function and its callees
 func (u *VU) runFn(
-	ctx context.Context, isDefault bool, fn goja.Callable, cancel func(), args ...goja.Value,
-) (v goja.Value, isFullIteration bool, t time.Duration, err error) {
+	ctx context.Context, isDefault bool, fn sobek.Callable, cancel func(), args ...sobek.Value,
+) (v sobek.Value, isFullIteration bool, t time.Duration, err error) {
 	if !u.Runner.Bundle.Options.NoCookiesReset.ValueOrZero() {
 		u.state.CookieJar, err = cookiejar.New(nil)
 		if err != nil {
-			return goja.Undefined(), false, time.Duration(0), err
+			return sobek.Undefined(), false, time.Duration(0), err
 		}
 	}
 
@@ -821,11 +840,9 @@ func (u *VU) runFn(
 	if u.moduleVUImpl.eventLoop == nil {
 		u.moduleVUImpl.eventLoop = eventloop.New(u.moduleVUImpl)
 	}
-	err = common.RunWithPanicCatching(u.state.Logger, u.Runtime, func() error {
-		return u.moduleVUImpl.eventLoop.Start(func() (err error) {
-			v, err = fn(goja.Undefined(), args...) // Actually run the JS script
-			return err
-		})
+	err = u.moduleVUImpl.eventLoop.Start(func() (err error) {
+		v, err = fn(sobek.Undefined(), args...) // Actually run the JS script
+		return err
 	})
 
 	select {
@@ -840,22 +857,51 @@ func (u *VU) runFn(
 		u.moduleVUImpl.eventLoop.WaitOnRegistered()
 	}
 	endTime := time.Now()
-	var exception *goja.Exception
+	var exception *sobek.Exception
 	if errors.As(err, &exception) {
-		err = &scriptException{inner: exception}
+		err = &scriptExceptionError{inner: exception}
 	}
 
 	if u.Runner.Bundle.Options.NoVUConnectionReuse.Bool {
 		u.Transport.CloseIdleConnections()
 	}
 
-	u.state.Samples <- u.Dialer.GetTrail(
-		startTime, endTime, isFullIteration,
-		isDefault, u.state.Tags.GetCurrentValues(), u.Runner.preInitState.BuiltinMetrics)
+	builtinMetrics := u.Runner.preInitState.BuiltinMetrics
+	ctm := u.state.Tags.GetCurrentValues()
+	u.state.Samples <- u.Dialer.IOSamples(endTime, ctm, builtinMetrics)
+
+	if isFullIteration && isDefault {
+		u.state.Samples <- iterationSamples(startTime, endTime, ctm, builtinMetrics)
+	}
 
 	v = unPromisify(v)
 
 	return v, isFullIteration, endTime.Sub(startTime), err
+}
+
+func iterationSamples(
+	startTime, endTime time.Time, ctm metrics.TagsAndMeta, builtinMetrics *metrics.BuiltinMetrics,
+) metrics.Samples {
+	return metrics.Samples([]metrics.Sample{
+		{
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.IterationDuration,
+				Tags:   ctm.Tags,
+			},
+			Time:     endTime,
+			Metadata: ctm.Metadata,
+			Value:    metrics.D(endTime.Sub(startTime)),
+		},
+		{
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.Iterations,
+				Tags:   ctm.Tags,
+			},
+			Time:     endTime,
+			Metadata: ctm.Metadata,
+			Value:    1,
+		},
+	})
 }
 
 func (u *ActiveVU) incrIteration() {
@@ -873,8 +919,8 @@ func (u *ActiveVU) incrIteration() {
 	}
 }
 
-type scriptException struct {
-	inner *goja.Exception
+type scriptExceptionError struct {
+	inner *sobek.Exception
 }
 
 var _ interface {
@@ -882,37 +928,29 @@ var _ interface {
 	errext.HasExitCode
 	errext.HasHint
 	errext.HasAbortReason
-} = &scriptException{}
+} = &scriptExceptionError{}
 
-func (s *scriptException) Error() string {
+func (s *scriptExceptionError) Error() string {
 	// this calls String instead of error so that by default if it's printed to print the stacktrace
 	return s.inner.String()
 }
 
-func (s *scriptException) StackTrace() string {
+func (s *scriptExceptionError) StackTrace() string {
 	return s.inner.String()
 }
 
-func (s *scriptException) Unwrap() error {
+func (s *scriptExceptionError) Unwrap() error {
 	return s.inner
 }
 
-func (s *scriptException) Hint() string {
+func (s *scriptExceptionError) Hint() string {
 	return "script exception"
 }
 
-func (s *scriptException) AbortReason() errext.AbortReason {
+func (s *scriptExceptionError) AbortReason() errext.AbortReason {
 	return errext.AbortedByScriptError
 }
 
-func (s *scriptException) ExitCode() exitcodes.ExitCode {
+func (s *scriptExceptionError) ExitCode() exitcodes.ExitCode {
 	return exitcodes.ScriptException
-}
-
-func copyStringMap(m map[string]string) map[string]string {
-	clone := make(map[string]string, len(m))
-	for ktag, vtag := range m {
-		clone[ktag] = vtag
-	}
-	return clone
 }

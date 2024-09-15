@@ -1,4 +1,4 @@
-// Copyright 2020-2022 Buf Technologies, Inc.
+// Copyright 2020-2024 Buf Technologies, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -96,14 +96,19 @@ type SourceInfoMode int
 
 const (
 	// SourceInfoNone indicates that no source code info is generated.
-	SourceInfoNone = SourceInfoMode(iota)
+	SourceInfoNone = SourceInfoMode(0)
 	// SourceInfoStandard indicates that the standard source code info is
 	// generated, which includes comments only for complete declarations.
-	SourceInfoStandard
+	SourceInfoStandard = SourceInfoMode(1)
 	// SourceInfoExtraComments indicates that source code info is generated
 	// and will include comments for all elements (more comments than would
 	// be found in a descriptor produced by protoc).
-	SourceInfoExtraComments
+	SourceInfoExtraComments = SourceInfoMode(2)
+	// SourceInfoExtraOptionLocations indicates that source code info is
+	// generated with additional locations for elements inside of message
+	// literals in option values. This can be combined with the above by
+	// bitwise-OR'ing it with SourceInfoExtraComments.
+	SourceInfoExtraOptionLocations = SourceInfoMode(4)
 )
 
 // Compile compiles the given file names into fully-linked descriptors. The
@@ -435,31 +440,28 @@ func (t *task) asFile(ctx context.Context, name string, r SearchResult) (linker.
 		}
 	}
 
+	var overrideDescriptorProto linker.File
 	if len(imports) > 0 {
 		t.r.setBlockedOn(imports)
 
 		results := make([]*result, len(fileDescriptorProto.Dependency))
 		checked := map[string]struct{}{}
 		for i, dep := range fileDescriptorProto.Dependency {
-			pos := findImportPos(parseRes, dep)
+			span := findImportSpan(parseRes, dep)
 			if name == dep {
 				// doh! file imports itself
-				handleImportCycle(t.h, pos, []string{name}, dep)
+				handleImportCycle(t.h, span, []string{name}, dep)
 				return nil, t.h.Error()
 			}
 
 			res := t.e.compile(ctx, dep)
 			// check for dependency cycle to prevent deadlock
-			if err := t.e.checkForDependencyCycle(res, []string{name, dep}, pos, checked); err != nil {
+			if err := t.e.checkForDependencyCycle(res, []string{name, dep}, span, checked); err != nil {
 				return nil, err
 			}
 			results[i] = res
 		}
-		capacity := len(results)
-		if wantsDescriptorProto {
-			capacity++
-		}
-		deps = make([]linker.File, len(results), capacity)
+		deps = make([]linker.File, len(results))
 		var descriptorProtoRes *result
 		if wantsDescriptorProto {
 			descriptorProtoRes = t.e.compile(ctx, descriptorProtoPath)
@@ -479,7 +481,7 @@ func (t *task) asFile(ctx context.Context, name string, r SearchResult) (linker.
 						// it's usually considered immediately fatal. However, if the reason
 						// we were resolving is due to an import, turn this into an error with
 						// source position that pinpoints the import statement and report it.
-						return nil, reporter.Error(findImportPos(parseRes, res.name), rerr)
+						return nil, reporter.Error(findImportSpan(parseRes, res.name), rerr)
 					}
 					return nil, res.err
 				}
@@ -493,13 +495,12 @@ func (t *task) asFile(ctx context.Context, name string, r SearchResult) (linker.
 			case <-descriptorProtoRes.ready:
 				// descriptor.proto wasn't explicitly imported, so we can ignore a failure
 				if descriptorProtoRes.err == nil {
-					deps = append(deps, descriptorProtoRes.res)
+					overrideDescriptorProto = descriptorProtoRes.res
 				}
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
 		}
-
 		// all deps resolved
 		t.r.setBlockedOn(nil)
 		// reacquire semaphore so we can proceed
@@ -509,10 +510,10 @@ func (t *task) asFile(ctx context.Context, name string, r SearchResult) (linker.
 		t.released = false
 	}
 
-	return t.link(parseRes, deps)
+	return t.link(parseRes, deps, overrideDescriptorProto)
 }
 
-func (e *executor) checkForDependencyCycle(res *result, sequence []string, pos ast.SourcePos, checked map[string]struct{}) error {
+func (e *executor) checkForDependencyCycle(res *result, sequence []string, span ast.SourceSpan, checked map[string]struct{}) error {
 	if _, ok := checked[res.name]; ok {
 		// already checked this one
 		return nil
@@ -523,7 +524,7 @@ func (e *executor) checkForDependencyCycle(res *result, sequence []string, pos a
 		// is this a cycle?
 		for _, file := range sequence {
 			if file == dep {
-				handleImportCycle(e.h, pos, sequence, dep)
+				handleImportCycle(e.h, span, sequence, dep)
 				return e.h.Error()
 			}
 		}
@@ -534,64 +535,83 @@ func (e *executor) checkForDependencyCycle(res *result, sequence []string, pos a
 		if depRes == nil {
 			continue
 		}
-		if err := e.checkForDependencyCycle(depRes, append(sequence, dep), pos, checked); err != nil {
+		if err := e.checkForDependencyCycle(depRes, append(sequence, dep), span, checked); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func handleImportCycle(h *reporter.Handler, pos ast.SourcePos, importSequence []string, dep string) {
+func handleImportCycle(h *reporter.Handler, span ast.SourceSpan, importSequence []string, dep string) {
 	var buf bytes.Buffer
 	buf.WriteString("cycle found in imports: ")
 	for _, imp := range importSequence {
-		fmt.Fprintf(&buf, "%q -> ", imp)
+		_, _ = fmt.Fprintf(&buf, "%q -> ", imp)
 	}
-	fmt.Fprintf(&buf, "%q", dep)
+	_, _ = fmt.Fprintf(&buf, "%q", dep)
 	// error is saved and returned in caller
-	h.HandleErrorf(pos, buf.String()) //nolint:errcheck
+	_ = h.HandleErrorf(span, buf.String())
 }
 
-func findImportPos(res parser.Result, dep string) ast.SourcePos {
+func findImportSpan(res parser.Result, dep string) ast.SourceSpan {
 	root := res.AST()
 	if root == nil {
-		return ast.UnknownPos(res.FileNode().Name())
+		return ast.UnknownSpan(res.FileNode().Name())
 	}
 	for _, decl := range root.Decls {
 		if imp, ok := decl.(*ast.ImportNode); ok {
 			if imp.Name.AsString() == dep {
-				return root.NodeInfo(imp.Name).Start()
+				return root.NodeInfo(imp.Name)
 			}
 		}
 	}
 	// this should never happen...
-	return ast.UnknownPos(res.FileNode().Name())
+	return ast.UnknownSpan(res.FileNode().Name())
 }
 
-func (t *task) link(parseRes parser.Result, deps linker.Files) (linker.File, error) {
+func (t *task) link(parseRes parser.Result, deps linker.Files, overrideDescriptorProtoRes linker.File) (linker.File, error) {
 	file, err := linker.Link(parseRes, deps, t.e.sym, t.h)
 	if err != nil {
 		return nil, err
 	}
-	optsIndex, err := options.InterpretOptions(file, t.h)
+
+	var interpretOpts []options.InterpreterOption
+	if overrideDescriptorProtoRes != nil {
+		interpretOpts = []options.InterpreterOption{options.WithOverrideDescriptorProto(overrideDescriptorProtoRes)}
+	}
+
+	optsIndex, err := options.InterpretOptions(file, t.h, interpretOpts...)
 	if err != nil {
 		return nil, err
 	}
 	// now that options are interpreted, we can do some additional checks
-	if err := file.ValidateOptions(t.h); err != nil {
+	if err := file.ValidateOptions(t.h, t.e.sym); err != nil {
 		return nil, err
 	}
 	if t.r.explicitFile {
 		file.CheckForUnusedImports(t.h)
 	}
+	if err := t.h.Error(); err != nil {
+		return nil, err
+	}
 
 	if needsSourceInfo(parseRes, t.e.c.SourceInfoMode) {
-		switch t.e.c.SourceInfoMode {
-		case SourceInfoStandard:
-			parseRes.FileDescriptorProto().SourceCodeInfo = sourceinfo.GenerateSourceInfo(parseRes.AST(), optsIndex)
-		case SourceInfoExtraComments:
-			parseRes.FileDescriptorProto().SourceCodeInfo = sourceinfo.GenerateSourceInfoWithExtraComments(parseRes.AST(), optsIndex)
+		var srcInfoOpts []sourceinfo.GenerateOption
+		if t.e.c.SourceInfoMode&SourceInfoExtraComments != 0 {
+			srcInfoOpts = append(srcInfoOpts, sourceinfo.WithExtraComments())
 		}
+		if t.e.c.SourceInfoMode&SourceInfoExtraOptionLocations != 0 {
+			srcInfoOpts = append(srcInfoOpts, sourceinfo.WithExtraOptionLocations())
+		}
+		parseRes.FileDescriptorProto().SourceCodeInfo = sourceinfo.GenerateSourceInfo(parseRes.AST(), optsIndex, srcInfoOpts...)
+	} else if t.e.c.SourceInfoMode == SourceInfoNone {
+		// If results came from unlinked FileDescriptorProto, it could have
+		// source info that we should strip.
+		parseRes.FileDescriptorProto().SourceCodeInfo = nil
+	}
+	if len(parseRes.FileDescriptorProto().GetSourceCodeInfo().GetLocation()) > 0 {
+		// If we have source code info in the descriptor proto at this point,
+		// we have to build the index of locations.
 		file.PopulateSourceCodeInfo()
 	}
 

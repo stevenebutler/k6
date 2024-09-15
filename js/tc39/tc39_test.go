@@ -7,29 +7,30 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"io/fs"
 	"net/url"
 	"os"
 	"path"
-	"runtime"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/dop251/goja"
-	"github.com/dop251/goja/parser"
+	"github.com/grafana/sobek"
+	"github.com/grafana/sobek/parser"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"go.k6.io/k6/js/compiler"
 	"go.k6.io/k6/js/modules"
 	"go.k6.io/k6/js/modulestest"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/loader"
+	"go.k6.io/k6/usage"
 	"gopkg.in/yaml.v3"
 )
 
@@ -43,7 +44,7 @@ var (
 
 	// ignorableTestError = newSymbol(stringEmpty)
 
-	sabStub = goja.MustCompile("sabStub.js", `
+	sabStub = sobek.MustCompile("sabStub.js", `
 		Object.defineProperty(this, "SharedArrayBuffer", {
 			get: function() {
 				throw IgnorableTestError;
@@ -52,39 +53,55 @@ var (
 		false)
 
 	featuresBlockList = []string{
-		"BigInt",                      // not supported at all
 		"IsHTMLDDA",                   // not supported at all
 		"async-iteration",             // not supported at all
 		"top-level-await",             // not supported at all
 		"String.prototype.replaceAll", // not supported at all, Stage 4 since 2020
 
-		// from goja
+		// from Sobek
 		"Symbol.asyncIterator",
+		"resizable-arraybuffer",
 		"regexp-named-groups",
-		"regexp-dotall",
-		"regexp-unicode-property-escapes",
+		"regexp-duplicate-named-groups",
 		"regexp-unicode-property-escapes",
 		"regexp-match-indices",
+		"regexp-modifiers",
+		"RegExp.escape",
 		"legacy-regexp",
 		"tail-call-optimization",
 		"Temporal",
 		"import-assertions",
-		"dynamic-import",
 		"logical-assignment-operators",
-		"import.meta",
 		"Atomics",
 		"Atomics.waitAsync",
+		"Atomics.pause",
 		"FinalizationRegistry",
 		"WeakRef",
-		"numeric-separator-literal",
 		"__getter__",
 		"__setter__",
 		"ShadowRealm",
 		"SharedArrayBuffer",
-		"error-cause",
-		"resizable-arraybuffer", // stage 3 as of 2021 https://github.com/tc39/proposal-resizablearraybuffer
+		"decorators",
 
-		"array-find-from-last", // stage 3 as of 2021 https://github.com/tc39/proposal-array-find-from-last
+		"regexp-duplicate-named-groups",
+		"regexp-v-flag",
+		"iterator-helpers",
+		"symbols-as-weakmap-keys",
+		"uint8array-base64",
+		"String.prototype.toWellFormed",
+		"explicit-resource-management",
+		"set-methods",
+		"promise-try",
+		"promise-with-resolvers",
+		"array-grouping",
+		"Math.sumPrecise",
+		"Float16Array",
+		"arraybuffer-transfer",
+		"Array.fromAsync",
+		"String.prototype.isWellFormed",
+
+		"source-phase-imports",
+		"import-attributes",
 	}
 	skipWords = []string{}
 	skipList  = map[string]bool{
@@ -146,6 +163,11 @@ var (
 		"test/language/expressions/compound-assignment/S11.13.2_A7.10_T2.js": true,
 		"test/language/expressions/compound-assignment/S11.13.2_A7.10_T1.js": true,
 		"test/language/expressions/assignment/S11.13.1_A7_T3.js":             true,
+
+		// timezone (apparently it depends on local timezone settings)
+		"test/built-ins/Date/prototype/toISOString/15.9.5.43-0-8.js":  true,
+		"test/built-ins/Date/prototype/toISOString/15.9.5.43-0-9.js":  true,
+		"test/built-ins/Date/prototype/toISOString/15.9.5.43-0-10.js": true,
 	}
 	pathBasedBlock = []string{ // This completely skips any path matching it without any kind of message
 		"test/annexB/built-ins/Date",
@@ -224,7 +246,14 @@ var (
 		"test/built-ins/Object/prototype/__define", // AnnexB defineGetter defineSetter
 
 		"test/language/expressions/dynamic-import", // not supported
+
+		// Go 1.16 only supports unicode 13; While go 1.21 has support for this - we disable them
+		// so that they aren't flaky between versions.
+		"test/language/identifiers/start-unicode-14.",
+		"test/language/identifiers/part-unicode-14.",
 	}
+
+	update = flag.Bool("update", false, "update breaking_test_errors-*.json files") //nolint:gochecknoglobals
 )
 
 //nolint:unused,structcheck
@@ -241,10 +270,9 @@ type tc39BenchmarkItem struct {
 type tc39BenchmarkData []tc39BenchmarkItem
 
 type tc39TestCtx struct {
-	compilerPool   *compiler.Pool
 	base           string
 	t              *testing.T
-	prgCache       map[string]*goja.Program
+	prgCache       map[string]*sobek.Program
 	prgCacheLock   sync.Mutex
 	enableBench    bool
 	benchmark      tc39BenchmarkData
@@ -254,6 +282,8 @@ type tc39TestCtx struct {
 
 	errorsLock sync.Mutex
 	errors     map[string]string
+
+	compatibilityMode lib.CompatibilityMode
 }
 
 type TC39MetaNegative struct {
@@ -284,7 +314,7 @@ func parseTC39File(name string) (*tc39Meta, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	defer f.Close() //nolint:errcheck,gosec
+	defer f.Close() //nolint:errcheck
 
 	b, err := io.ReadAll(f)
 	if err != nil {
@@ -315,16 +345,16 @@ func parseTC39File(name string) (*tc39Meta, string, error) {
 	return &meta, string(b), nil
 }
 
-func (*tc39TestCtx) detachArrayBuffer(call goja.FunctionCall) goja.Value {
-	if obj, ok := call.Argument(0).(*goja.Object); ok {
-		var buf goja.ArrayBuffer
-		if goja.New().ExportTo(obj, &buf) == nil {
-			// if buf, ok := obj.Export().(goja.ArrayBuffer); ok {
+func (*tc39TestCtx) detachArrayBuffer(call sobek.FunctionCall) sobek.Value {
+	if obj, ok := call.Argument(0).(*sobek.Object); ok {
+		var buf sobek.ArrayBuffer
+		if sobek.New().ExportTo(obj, &buf) == nil {
+			// if buf, ok := obj.Export().(sobek.ArrayBuffer); ok {
 			buf.Detach()
-			return goja.Undefined()
+			return sobek.Undefined()
 		}
 	}
-	panic(goja.New().NewTypeError("detachArrayBuffer() is called with incompatible argument"))
+	panic(sobek.New().NewTypeError("detachArrayBuffer() is called with incompatible argument"))
 }
 
 func (ctx *tc39TestCtx) fail(t testing.TB, name string, strict bool, errStr string) {
@@ -360,15 +390,15 @@ func (ctx *tc39TestCtx) runTC39Test(t testing.TB, name, src string, meta *tc39Me
 			failf("panic while running %s: %v", name, x)
 		}
 	}()
-	vm := goja.New()
+	vm := sobek.New()
 	_262 := vm.NewObject()
 	ignorableTestError := vm.NewGoError(fmt.Errorf(""))
-	vm.Set("IgnorableTestError", ignorableTestError)
+	_ = vm.Set("IgnorableTestError", ignorableTestError)
 	_ = _262.Set("detachArrayBuffer", ctx.detachArrayBuffer)
-	_ = _262.Set("createRealm", func(goja.FunctionCall) goja.Value {
+	_ = _262.Set("createRealm", func(sobek.FunctionCall) sobek.Value {
 		panic(ignorableTestError)
 	})
-	_ = _262.Set("evalScript", func(call goja.FunctionCall) goja.Value {
+	_ = _262.Set("evalScript", func(call sobek.FunctionCall) sobek.Value {
 		script := call.Argument(0).String()
 		result, err := vm.RunString(script)
 		if err != nil {
@@ -377,8 +407,8 @@ func (ctx *tc39TestCtx) runTC39Test(t testing.TB, name, src string, meta *tc39Me
 		return result
 	})
 
-	vm.Set("$262", _262)
-	vm.Set("print", t.Log)
+	_ = vm.Set("$262", _262)
+	_ = vm.Set("print", t.Log)
 	_, err := vm.RunProgram(sabStub)
 	if err != nil {
 		panic(err)
@@ -401,11 +431,10 @@ func (ctx *tc39TestCtx) runTC39Test(t testing.TB, name, src string, meta *tc39Me
 		_ = vm.Set("print", t.Log)
 	}
 	var early bool
-	var origErr error
 	if meta.hasFlag("module") {
-		early, origErr, err = ctx.runTC39Module(name, src, meta.Includes, vm)
+		early, err = ctx.runTC39Module(name, src, meta.Includes, vm)
 	} else {
-		early, origErr, err = ctx.runTC39Script(name, src, meta.Includes, vm, meta.Negative.Type != "")
+		early, err = ctx.runTC39Script(name, src, meta.Includes, vm, meta.Negative.Type != "")
 	}
 
 	if err == nil {
@@ -421,7 +450,7 @@ func (ctx *tc39TestCtx) runTC39Test(t testing.TB, name, src string, meta *tc39Me
 	}
 
 	if meta.Negative.Type == "" {
-		if err, ok := err.(*goja.Exception); ok {
+		if err, ok := err.(*sobek.Exception); ok { //nolint:errorlint
 			if err.Value() == ignorableTestError {
 				t.Skip("Test threw IgnorableTestError")
 			}
@@ -436,9 +465,6 @@ func (ctx *tc39TestCtx) runTC39Test(t testing.TB, name, src string, meta *tc39Me
 	errType := getErrType(name, err, failf)
 
 	if errType != "" && errType != meta.Negative.Type {
-		if meta.Negative.Type == "SyntaxError" && origErr != nil && getErrType(name, origErr, failf) == meta.Negative.Type {
-			return
-		}
 		// vm.vm.prg.dumpCode(t.Logf)
 		failf("%s: unexpected error type (%s), expected (%s)", name, errType, meta.Negative.Type)
 		return
@@ -472,27 +498,24 @@ func (ctx *tc39TestCtx) runTC39Test(t testing.TB, name, src string, meta *tc39Me
 }
 
 func getErrType(name string, err error, failf func(str string, args ...interface{})) string {
-	switch err := err.(type) {
-	case *goja.Exception:
-		if o, ok := err.Value().(*goja.Object); ok { //nolint:nestif
+	switch err := err.(type) { //nolint:errorlint
+	case *sobek.Exception:
+		if o, ok := err.Value().(*sobek.Object); ok {
 			if c := o.Get("constructor"); c != nil {
-				if c, ok := c.(*goja.Object); ok {
+				if c, ok := c.(*sobek.Object); ok {
 					return c.Get("name").String()
-				} else {
-					failf("%s: error constructor is not an object (%v)", name, o)
-					return ""
 				}
-			} else {
-				failf("%s: error does not have a constructor (%v)", name, o)
+				failf("%s: error constructor is not an object (%v)", name, o)
 				return ""
 			}
-		} else {
-			failf("%s: error is not an object (%v)", name, err.Value())
+			failf("%s: error does not have a constructor (%v)", name, o)
 			return ""
 		}
-	case *goja.CompilerSyntaxError, *parser.Error, parser.ErrorList:
+		failf("%s: error is not an object (%v)", name, err.Value())
+		return ""
+	case *sobek.CompilerSyntaxError, *parser.Error, parser.ErrorList:
 		return "SyntaxError"
-	case *goja.CompilerReferenceError:
+	case *sobek.CompilerReferenceError:
 		return "ReferenceError"
 	default:
 		failf("%s: error is not a JS error: %v", name, err)
@@ -557,25 +580,31 @@ func (ctx *tc39TestCtx) runTC39File(name string, t testing.TB) {
 	}
 }
 
+func breakingTestErrorsFilename(compatibilityMode lib.CompatibilityMode) string {
+	return fmt.Sprintf("./breaking_test_errors-%s.json", compatibilityMode)
+}
+
 func (ctx *tc39TestCtx) init() {
-	ctx.prgCache = make(map[string]*goja.Program)
+	ctx.prgCache = make(map[string]*sobek.Program)
 	ctx.errors = make(map[string]string)
 
-	b, err := os.ReadFile("./breaking_test_errors.json")
-	if err != nil {
-		panic(err)
-	}
-	b = bytes.TrimSpace(b)
-	if len(b) > 0 {
-		ctx.expectedErrors = make(map[string]string, 1000)
-		err = json.Unmarshal(b, &ctx.expectedErrors)
+	if !*update {
+		b, err := os.ReadFile(breakingTestErrorsFilename(ctx.compatibilityMode))
 		if err != nil {
 			panic(err)
+		}
+		b = bytes.TrimSpace(b)
+		if len(b) > 0 {
+			ctx.expectedErrors = make(map[string]string, 1000)
+			err = json.Unmarshal(b, &ctx.expectedErrors)
+			if err != nil {
+				panic(err)
+			}
 		}
 	}
 }
 
-func (ctx *tc39TestCtx) compile(base, name string) (*goja.Program, error) {
+func (ctx *tc39TestCtx) compile(base, name string) (*sobek.Program, error) {
 	ctx.prgCacheLock.Lock()
 	defer ctx.prgCacheLock.Unlock()
 
@@ -586,18 +615,14 @@ func (ctx *tc39TestCtx) compile(base, name string) (*goja.Program, error) {
 		if err != nil {
 			return nil, err
 		}
-		defer f.Close() //nolint:gosec,errcheck
+		defer f.Close() //nolint:errcheck
 
 		b, err := io.ReadAll(f)
 		if err != nil {
 			return nil, err
 		}
 
-		str := string(b)
-		comp := ctx.compilerPool.Get()
-		defer ctx.compilerPool.Put(comp)
-		comp.Options = compiler.Options{Strict: false, CompatibilityMode: lib.CompatibilityModeExtended}
-		prg, _, err = comp.Compile(str, name, true)
+		prg, err = ctx.compileOnly(string(b), name, ctx.compatibilityMode)
 		if err != nil {
 			return nil, err
 		}
@@ -607,7 +632,7 @@ func (ctx *tc39TestCtx) compile(base, name string) (*goja.Program, error) {
 	return prg, nil
 }
 
-func (ctx *tc39TestCtx) runFile(base, name string, vm *goja.Runtime) error {
+func (ctx *tc39TestCtx) runFile(base, name string, vm *sobek.Runtime) error {
 	prg, err := ctx.compile(base, name)
 	if err != nil {
 		return err
@@ -616,88 +641,84 @@ func (ctx *tc39TestCtx) runFile(base, name string, vm *goja.Runtime) error {
 	return err
 }
 
-func (ctx *tc39TestCtx) runTC39Script(name, src string, includes []string, vm *goja.Runtime, expectsError bool) (early bool, origErr, err error) {
+func (ctx *tc39TestCtx) compileOnly(src, name string, compatibilityMode lib.CompatibilityMode) (*sobek.Program, error) {
+	comp := ctx.compiler()
+	comp.Options = compiler.Options{CompatibilityMode: compatibilityMode}
+	astProgram, _, err := comp.Parse(src, name, false)
+	if err != nil {
+		return nil, err
+	}
+	return sobek.CompileAST(astProgram, false)
+}
+
+func (ctx *tc39TestCtx) compiler() *compiler.Compiler {
+	return compiler.New(testutils.NewLogger(ctx.t))
+}
+
+func (ctx *tc39TestCtx) runTC39Script(name, src string, includes []string, vm *sobek.Runtime, expectsError bool) (early bool, err error) {
 	early = true
 	err = ctx.runFile(ctx.base, path.Join("harness", "assert.js"), vm)
 	if err != nil {
-		return
+		return early, err
 	}
 
 	err = ctx.runFile(ctx.base, path.Join("harness", "sta.js"), vm)
 	if err != nil {
-		return
+		return early, err
 	}
 
 	for _, include := range includes {
 		err = ctx.runFile(ctx.base, path.Join("harness", include), vm)
 		if err != nil {
-			return
+			return early, err
 		}
 	}
 
-	var p *goja.Program
-	comp := ctx.compilerPool.Get()
-	defer ctx.compilerPool.Put(comp)
-	comp.Options = compiler.Options{Strict: false, CompatibilityMode: lib.CompatibilityModeBase}
-	p, _, err = comp.Compile(src, name, true)
-	origErr = err
+	p, err := ctx.compileOnly(src, name, lib.CompatibilityModeBase)
 	if err != nil && !expectsError {
-		src, _, err = comp.Transform(src, name, nil)
-		if err == nil {
-			p, _, err = comp.Compile(src, name, true)
-		}
+		p, err = ctx.compileOnly(src, name, lib.CompatibilityModeExtended)
 	}
-
 	if err != nil {
-		return
+		return early, err
 	}
 
 	early = false
 	_, err = vm.RunProgram(p)
 
-	return early, origErr, err
+	return early, err
 }
 
-func (ctx *tc39TestCtx) runTC39Module(name, src string, includes []string, vm *goja.Runtime) (early bool, origErr, err error) {
-	currentFS := os.DirFS(".")
-	if err != nil {
-		panic(err)
-	}
+func (ctx *tc39TestCtx) runTC39Module(name, src string, includes []string, vm *sobek.Runtime) (early bool, err error) {
 	moduleRuntime := modulestest.NewRuntime(ctx.t)
 	moduleRuntime.VU.RuntimeField = vm
 	early = true
 	err = ctx.runFile(ctx.base, path.Join("harness", "assert.js"), vm)
 	if err != nil {
-		return
+		return early, err
 	}
 
 	err = ctx.runFile(ctx.base, path.Join("harness", "sta.js"), vm)
 	if err != nil {
-		return
+		return early, err
 	}
 
 	for _, include := range includes {
 		err = ctx.runFile(ctx.base, path.Join("harness", include), vm)
 		if err != nil {
-			return
+			return early, err
 		}
 	}
 
-	comp := ctx.compilerPool.Get()
-	defer ctx.compilerPool.Put(comp)
-	comp.Options = compiler.Options{Strict: false, CompatibilityMode: lib.CompatibilityModeExtended}
-
-	mr := modules.NewModuleResolver(nil,
-		func(specifier *url.URL, name string) ([]byte, error) {
-			return fs.ReadFile(currentFS, specifier.Path[1:])
-		},
-		comp)
-	u := &url.URL{Path: path.Join(ctx.base, name)}
-
+	u := &url.URL{Scheme: "file", Path: "/" + path.Join(ctx.base, name)}
 	base := u.JoinPath("..")
+	mr := modules.NewModuleResolver(nil,
+		func(specifier *url.URL, _ string) ([]byte, error) {
+			return fs.ReadFile(os.DirFS("."), specifier.Path[1:])
+		},
+		ctx.compiler(), base, usage.New(), testutils.NewLogger(ctx.t))
+
 	ms := modules.NewModuleSystem(mr, moduleRuntime.VU)
-	impl := modules.NewLegacyRequireImpl(moduleRuntime.VU, ms, *base)
-	require.NoError(ctx.t, vm.Set("require", impl.Require))
+	moduleRuntime.VU.InitEnvField.CWD = base
 
 	early = false
 	_, err = ms.RunSourceData(&loader.SourceData{
@@ -705,7 +726,7 @@ func (ctx *tc39TestCtx) runTC39Module(name, src string, includes []string, vm *g
 		URL:  u,
 	})
 
-	return early, origErr, err
+	return early, err
 }
 
 func (ctx *tc39TestCtx) runTC39Tests(name string) {
@@ -746,18 +767,26 @@ outer:
 	}
 }
 
+//nolint:paralleltest // this is on purpose so the test can wait for the subtest to finish
 func TestTC39(t *testing.T) {
 	if testing.Short() {
 		t.Skip()
 	}
+
+	runTestTC39(t, lib.CompatibilityModeExtended)
+	runTestTC39(t, lib.CompatibilityModeExperimentalEnhanced)
+}
+
+func runTestTC39(t *testing.T, compatibilityMode lib.CompatibilityMode) {
+	t.Helper()
 
 	if _, err := os.Stat(tc39BASE); err != nil {
 		t.Skipf("If you want to run tc39 tests, you need to run the 'checkout.sh` script in the directory to get  https://github.com/tc39/test262 at the correct last tested commit (%v)", err)
 	}
 
 	ctx := &tc39TestCtx{
-		base:         tc39BASE,
-		compilerPool: compiler.NewPool(testutils.NewLogger(t), runtime.GOMAXPROCS(0)),
+		base:              tc39BASE,
+		compatibilityMode: compatibilityMode,
 	}
 	ctx.init()
 	// ctx.enableBench = true
@@ -784,10 +813,23 @@ func TestTC39(t *testing.T) {
 			fmt.Printf("%s\t%d\n", item.name, item.duration/time.Millisecond)
 		}
 	}
-	if len(ctx.errors) > 0 {
-		enc := json.NewEncoder(os.Stdout)
+	if len(ctx.errors) > 0 && *update {
+		filename := breakingTestErrorsFilename(ctx.compatibilityMode)
+		file, err := os.Create(filepath.Clean(filename))
+		if err != nil {
+			t.Logf("Error while creating %s: %s", filename, err)
+		}
+
+		enc := json.NewEncoder(file)
 		enc.SetIndent("", "  ")
 		enc.SetEscapeHTML(false)
-		_ = enc.Encode(ctx.errors)
+		err = enc.Encode(ctx.errors)
+		if err != nil {
+			t.Logf("Error while json encoding errors: %s", err)
+		}
+		err = file.Close()
+		if err != nil {
+			t.Logf("Error while closing %s: %s", filename, err)
+		}
 	}
 }

@@ -23,9 +23,9 @@ const (
 		"       ✓ check1\n" +
 		"       ✗ check3\n        ↳  66% — ✓ 10 / ✗ 5\n" +
 		"       ✗ check2\n        ↳  33% — ✓ 5 / ✗ 10\n\n" +
-		"   ✓ checks......: 75.00% ✓ 45  ✗ 15 \n"
+		"   ✓ checks......: 75.00% 45 out of 60\n"
 	countOut = "   ✗ http_reqs...: 3      3/s\n"
-	gaugeOut = "     vus.........: 1      min=1 max=1\n"
+	gaugeOut = "     vus.........: 1      min=1        max=1\n"
 	trendOut = "   ✗ my_trend....: avg=15ms min=10ms med=15ms max=20ms p(90)=19ms " +
 		"p(95)=19.5ms p(99.9)=19.99ms\n"
 )
@@ -150,7 +150,7 @@ func createTestMetrics(t *testing.T) (map[string]*metrics.Metric, *lib.Group) {
 	require.NoError(t, err)
 	checksMetric.Tainted = null.BoolFrom(false)
 	checksMetric.Thresholds = metrics.Thresholds{Thresholds: []*metrics.Threshold{{Source: "rate>70", LastFailed: false}}}
-	sink := &metrics.TrendSink{}
+	sink := metrics.NewTrendSink()
 
 	samples := []float64{10.0, 15.0, 20.0}
 	for _, s := range samples {
@@ -698,5 +698,6 @@ func TestExceptionInHandleSummaryFallsBackToTextSummary(t *testing.T) {
 	assert.Equal(t, 1, len(logErrors))
 	errMsg, err := logErrors[0].String()
 	require.NoError(t, err)
-	assert.Contains(t, errMsg, "intentional error")
+	assert.Contains(t, errMsg, "\"Error: intentional error\\n\\tat file:///script.js:4:11(3)\\n")
+	assert.Equal(t, logErrors[0].Data, logrus.Fields{"hint": "script exception"})
 }

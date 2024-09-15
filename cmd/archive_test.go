@@ -1,21 +1,17 @@
 package cmd
 
 import (
-	"archive/tar"
-	"bytes"
 	"encoding/json"
-	"errors"
-	"io"
 	"io/fs"
-	"io/ioutil"
+	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"go.k6.io/k6/cmd/tests"
 	"go.k6.io/k6/errext/exitcodes"
 	"go.k6.io/k6/lib/fsext"
+	"go.k6.io/k6/lib/testutils"
 )
 
 func TestArchiveThresholds(t *testing.T) {
@@ -77,7 +73,7 @@ func TestArchiveThresholds(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			testScript, err := ioutil.ReadFile(testCase.testFilename)
+			testScript, err := os.ReadFile(testCase.testFilename) //nolint:forbidigo
 			require.NoError(t, err)
 
 			ts := tests.NewGlobalTestState(t)
@@ -108,7 +104,7 @@ func TestArchiveContainsEnv(t *testing.T) {
 	ts.CmdArgs = []string{"k6", "--env", "ENV1=lorem", "--env", "ENV2=ipsum", "archive", fileName}
 
 	newRootCommand(ts.GlobalState).execute()
-	require.NoError(t, untar(t, ts.FS, "archive.tar", "tmp/"))
+	require.NoError(t, testutils.Untar(t, ts.FS, "archive.tar", "tmp/"))
 
 	data, err := fsext.ReadFile(ts.FS, "tmp/metadata.json")
 	require.NoError(t, err)
@@ -128,6 +124,110 @@ func TestArchiveContainsEnv(t *testing.T) {
 	require.Equal(t, "ipsum", metadata.Env["ENV2"])
 }
 
+func TestArchiveContainsLegacyCloudSettings(t *testing.T) {
+	t.Parallel()
+
+	// given a script with the cloud options
+	fileName := "script.js"
+	testScript := []byte(`
+		export let options = {
+			ext: {
+				loadimpact: {
+					distribution: {
+						one: { loadZone: 'amazon:us:ashburn', percent: 30 },
+						two: { loadZone: 'amazon:ie:dublin', percent: 70 },
+					},
+				},
+			},
+		};
+		export default function () {}
+	`)
+	ts := tests.NewGlobalTestState(t)
+	require.NoError(t, fsext.WriteFile(ts.FS, filepath.Join(ts.Cwd, fileName), testScript, 0o644))
+
+	// when we do archiving
+	ts.CmdArgs = []string{"k6", "archive", fileName}
+
+	newRootCommand(ts.GlobalState).execute()
+	require.NoError(t, testutils.Untar(t, ts.FS, "archive.tar", "tmp/"))
+
+	data, err := fsext.ReadFile(ts.FS, "tmp/metadata.json")
+	require.NoError(t, err)
+
+	// we just need some basic struct
+	metadata := struct {
+		Options struct {
+			Ext struct {
+				LoadImpact struct {
+					Distribution map[string]struct {
+						LoadZone string  `json:"loadZone"`
+						Percent  float64 `json:"percent"`
+					} `json:"distribution"`
+				} `json:"loadimpact"`
+			} `json:"ext"`
+		} `json:"options"`
+	}{}
+
+	// then unpacked metadata should contain a ext.loadimpact struct the proper values
+	require.NoError(t, json.Unmarshal(data, &metadata))
+	require.Len(t, metadata.Options.Ext.LoadImpact.Distribution, 2)
+
+	require.Equal(t, metadata.Options.Ext.LoadImpact.Distribution["one"].LoadZone, "amazon:us:ashburn")
+	require.Equal(t, metadata.Options.Ext.LoadImpact.Distribution["one"].Percent, 30.)
+	require.Equal(t, metadata.Options.Ext.LoadImpact.Distribution["two"].LoadZone, "amazon:ie:dublin")
+	require.Equal(t, metadata.Options.Ext.LoadImpact.Distribution["two"].Percent, 70.)
+}
+
+func TestArchiveContainsCloudSettings(t *testing.T) {
+	t.Parallel()
+
+	// given a script with the cloud options
+	fileName := "script.js"
+	testScript := []byte(`
+		export let options = {
+			cloud: {
+				distribution: {
+					one: { loadZone: 'amazon:us:ashburn', percent: 30 },
+					two: { loadZone: 'amazon:ie:dublin', percent: 70 },
+				},
+			},
+		};
+		export default function () {}
+	`)
+	ts := tests.NewGlobalTestState(t)
+	require.NoError(t, fsext.WriteFile(ts.FS, filepath.Join(ts.Cwd, fileName), testScript, 0o644))
+
+	// when we do archiving
+	ts.CmdArgs = []string{"k6", "archive", fileName}
+
+	newRootCommand(ts.GlobalState).execute()
+	require.NoError(t, testutils.Untar(t, ts.FS, "archive.tar", "tmp/"))
+
+	data, err := fsext.ReadFile(ts.FS, "tmp/metadata.json")
+	require.NoError(t, err)
+
+	// we just need some basic struct
+	metadata := struct {
+		Options struct {
+			Cloud struct {
+				Distribution map[string]struct {
+					LoadZone string  `json:"loadZone"`
+					Percent  float64 `json:"percent"`
+				} `json:"distribution"`
+			} `json:"cloud"`
+		} `json:"options"`
+	}{}
+
+	// then unpacked metadata should contain options.cloud
+	require.NoError(t, json.Unmarshal(data, &metadata))
+	require.Len(t, metadata.Options.Cloud.Distribution, 2)
+
+	require.Equal(t, metadata.Options.Cloud.Distribution["one"].LoadZone, "amazon:us:ashburn")
+	require.Equal(t, metadata.Options.Cloud.Distribution["one"].Percent, 30.)
+	require.Equal(t, metadata.Options.Cloud.Distribution["two"].LoadZone, "amazon:ie:dublin")
+	require.Equal(t, metadata.Options.Cloud.Distribution["two"].Percent, 70.)
+}
+
 func TestArchiveNotContainsEnv(t *testing.T) {
 	t.Parallel()
 
@@ -141,7 +241,7 @@ func TestArchiveNotContainsEnv(t *testing.T) {
 	ts.CmdArgs = []string{"k6", "--env", "ENV1=lorem", "--env", "ENV2=ipsum", "archive", "--exclude-env-vars", fileName}
 
 	newRootCommand(ts.GlobalState).execute()
-	require.NoError(t, untar(t, ts.FS, "archive.tar", "tmp/"))
+	require.NoError(t, testutils.Untar(t, ts.FS, "archive.tar", "tmp/"))
 
 	data, err := fsext.ReadFile(ts.FS, "tmp/metadata.json")
 	require.NoError(t, err)
@@ -155,55 +255,23 @@ func TestArchiveNotContainsEnv(t *testing.T) {
 	require.Len(t, metadata.Env, 0)
 }
 
-// untar untars a `fileName` file to a `destination` path
-func untar(t *testing.T, fileSystem fsext.Fs, fileName string, destination string) error {
-	t.Helper()
+func TestArchiveStdout(t *testing.T) {
+	t.Parallel()
 
-	archiveFile, err := fsext.ReadFile(fileSystem, fileName)
-	if err != nil {
-		return err
+	// given some script that will be archived
+	fileName := "script.js"
+	testScript := []byte(`export default function () {}`)
+	ts := tests.NewGlobalTestState(t)
+	require.NoError(t, fsext.WriteFile(ts.FS, filepath.Join(ts.Cwd, fileName), testScript, 0o644))
+
+	ts.CmdArgs = []string{"k6", "archive", "-O", "-", fileName}
+
+	newRootCommand(ts.GlobalState).execute()
+
+	for _, filename := range []string{"-", "archive.tar"} {
+		_, err := ts.FS.Stat(filename)
+		require.ErrorIsf(t, err, fs.ErrNotExist, "%q should not exist", filename)
 	}
 
-	reader := bytes.NewBuffer(archiveFile)
-
-	tr := tar.NewReader(reader)
-
-	for {
-		header, err := tr.Next()
-		switch {
-		case errors.Is(err, io.EOF):
-			return nil
-		case err != nil:
-			return err
-		case header == nil:
-			continue
-		}
-
-		// as long as this code in a test helper, we can safely
-		// omit G305: File traversal when extracting zip/tar archive
-		target := filepath.Join(destination, header.Name) //nolint:gosec
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if _, err := fileSystem.Stat(target); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return err
-			}
-
-			if err := fileSystem.MkdirAll(target, 0o755); err != nil {
-				return err
-			}
-		case tar.TypeReg:
-			f, err := fileSystem.OpenFile(target, syscall.O_CREAT|syscall.O_RDWR, fs.FileMode(header.Mode))
-			if err != nil {
-				return err
-			}
-			defer func() { _ = f.Close() }()
-
-			// as long as this code in a test helper, we can safely
-			// omit G110: Potential DoS vulnerability via decompression bomb
-			if _, err := io.Copy(f, tr); err != nil { //nolint:gosec
-				return err
-			}
-		}
-	}
+	require.GreaterOrEqual(t, len(ts.Stdout.Bytes()), 32)
 }

@@ -1,15 +1,12 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,11 +20,13 @@ import (
 	"go.k6.io/k6/cmd/state"
 	"go.k6.io/k6/errext"
 	"go.k6.io/k6/errext/exitcodes"
+	"go.k6.io/k6/event"
 	"go.k6.io/k6/execution"
+	"go.k6.io/k6/execution/local"
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/consts"
 	"go.k6.io/k6/lib/fsext"
+	"go.k6.io/k6/lib/trace"
 	"go.k6.io/k6/metrics"
 	"go.k6.io/k6/metrics/engine"
 	"go.k6.io/k6/output"
@@ -37,7 +36,22 @@ import (
 // cmdRun handles the `k6 run` sub-command
 type cmdRun struct {
 	gs *state.GlobalState
+
+	// TODO: figure out something more elegant?
+	loadConfiguredTest func(cmd *cobra.Command, args []string) (*loadedAndConfiguredTest, execution.Controller, error)
 }
+
+const (
+	// We use an excessively high timeout to wait for event processing to complete,
+	// since prematurely proceeding before it is done could create bigger problems.
+	// In practice, this effectively acts as no timeout, and the user will have to
+	// kill k6 if a hang happens, which is the behavior without events anyway.
+	waitEventDoneTimeout = 30 * time.Minute
+
+	// This timeout should be long enough to flush all remaining traces, but still
+	// provides a safeguard to not block indefinitely.
+	waitForTracerProviderStopTimeout = 3 * time.Minute
+)
 
 // TODO: split apart some more
 //
@@ -66,7 +80,27 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) (err error) {
 	// from sub-contexts while also attaching a reason for the abort.
 	runCtx, runAbort := execution.NewTestRunContext(lingerCtx, logger)
 
-	test, err := loadAndConfigureTest(c.gs, cmd, args, getConfig)
+	emitEvent := func(evt *event.Event) func() {
+		waitDone := c.gs.Events.Emit(evt)
+		return func() {
+			waitCtx, waitCancel := context.WithTimeout(globalCtx, waitEventDoneTimeout)
+			defer waitCancel()
+			if werr := waitDone(waitCtx); werr != nil {
+				logger.WithError(werr).Warn()
+			}
+		}
+	}
+
+	defer func() {
+		waitExitDone := emitEvent(&event.Event{
+			Type: event.Exit,
+			Data: &event.ExitData{Error: err},
+		})
+		waitExitDone()
+		c.gs.Events.UnsubscribeAll()
+	}()
+
+	test, controller, err := c.loadConfiguredTest(cmd, args)
 	if err != nil {
 		return err
 	}
@@ -78,6 +112,17 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) (err error) {
 		}()
 	}
 
+	if err = c.setupTracerProvider(globalCtx, test); err != nil {
+		return err
+	}
+	waitTracesFlushed := func() {
+		ctx, cancel := context.WithTimeout(globalCtx, waitForTracerProviderStopTimeout)
+		defer cancel()
+		if tpErr := test.preInitState.TracerProvider.Shutdown(ctx); tpErr != nil {
+			logger.Errorf("The tracer provider didn't stop gracefully: %v", tpErr)
+		}
+	}
+
 	// Write the full consolidated *and derived* options back to the Runner.
 	conf := test.derivedConfig
 	testRunState, err := test.buildTestRunState(conf.Options)
@@ -87,7 +132,7 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) (err error) {
 
 	// Create a local execution scheduler wrapping the runner.
 	logger.Debug("Initializing the execution scheduler...")
-	execScheduler, err := execution.NewScheduler(testRunState)
+	execScheduler, err := execution.NewScheduler(testRunState, controller)
 	if err != nil {
 		return err
 	}
@@ -120,23 +165,36 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) (err error) {
 		return err
 	}
 
-	executionState := execScheduler.GetState()
-	metricsEngine, err := engine.NewMetricsEngine(executionState.Test)
+	outputs = append(outputs, testRunState.GroupSummary)
+
+	metricsEngine, err := engine.NewMetricsEngine(testRunState.Registry, logger)
 	if err != nil {
 		return err
 	}
-	if !testRunState.RuntimeOptions.NoSummary.Bool || !testRunState.RuntimeOptions.NoThresholds.Bool {
+
+	// We'll need to pipe metrics to the MetricsEngine and process them if any
+	// of these are enabled: thresholds, end-of-test summary
+	shouldProcessMetrics := (!testRunState.RuntimeOptions.NoSummary.Bool ||
+		!testRunState.RuntimeOptions.NoThresholds.Bool)
+	var metricsIngester *engine.OutputIngester
+	if shouldProcessMetrics {
+		err = metricsEngine.InitSubMetricsAndThresholds(conf.Options, testRunState.RuntimeOptions.NoThresholds.Bool)
+		if err != nil {
+			return err
+		}
 		// We'll need to pipe metrics to the MetricsEngine if either the
 		// thresholds or the end-of-test summary are enabled.
-		outputs = append(outputs, metricsEngine.CreateIngester())
+		metricsIngester = metricsEngine.CreateIngester()
+		outputs = append(outputs, metricsIngester)
 	}
 
+	executionState := execScheduler.GetState()
 	if !testRunState.RuntimeOptions.NoSummary.Bool {
 		defer func() {
 			logger.Debug("Generating the end-of-test summary...")
 			summaryResult, hsErr := test.initRunner.HandleSummary(globalCtx, &lib.Summary{
 				Metrics:         metricsEngine.ObservedMetrics,
-				RootGroup:       testRunState.Runner.GetDefaultGroup(),
+				RootGroup:       testRunState.GroupSummary.Group(),
 				TestRunDuration: executionState.GetCurrentTestRunDuration(),
 				NoColor:         c.gs.Flags.NoColor,
 				UIState: lib.UIState{
@@ -152,6 +210,8 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) (err error) {
 			}
 		}()
 	}
+
+	waitInitDone := emitEvent(&event.Event{Type: event.Init})
 
 	// Create and start the outputs. We do it quite early to get any output URLs
 	// or other details below. It also allows us to ensure when they have
@@ -179,7 +239,9 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) (err error) {
 	}()
 
 	if !testRunState.RuntimeOptions.NoThresholds.Bool {
-		finalizeThresholds := metricsEngine.StartThresholdCalculations(runAbort, executionState.GetCurrentTestRunDuration)
+		finalizeThresholds := metricsEngine.StartThresholdCalculations(
+			metricsIngester, runAbort, executionState.GetCurrentTestRunDuration,
+		)
 		handleFinalThresholdCalculation := func() {
 			// This gets called after the Samples channel has been closed and
 			// the OutputManager has flushed all of the cached samples to
@@ -208,10 +270,25 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) (err error) {
 	}
 
 	defer func() {
-		logger.Debug("Waiting for metric processing to finish...")
+		logger.Debug("Waiting for metrics and traces processing to finish...")
 		close(samples)
-		waitOutputsFlushed()
-		logger.Debug("Metrics processing finished!")
+
+		ww := [...]func(){
+			waitOutputsFlushed,
+			waitTracesFlushed,
+		}
+		var wg sync.WaitGroup
+		wg.Add(len(ww))
+		for _, w := range ww {
+			w := w
+			go func() {
+				w()
+				wg.Done()
+			}()
+		}
+		wg.Wait()
+
+		logger.Debug("Metrics and traces processing finished!")
 	}()
 
 	// Spin up the REST API server, if not disabled.
@@ -228,10 +305,20 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) (err error) {
 		srvCtx, srvCancel := context.WithCancel(globalCtx)
 		defer srvCancel()
 
-		srv := api.GetServer(runCtx, c.gs.Flags.Address, testRunState, samples, metricsEngine, execScheduler)
+		srv := api.GetServer(
+			runCtx,
+			c.gs.Flags.Address, c.gs.Flags.ProfilingEnabled,
+			testRunState,
+			samples,
+			metricsEngine,
+			execScheduler,
+		)
 		go func() {
 			defer apiWG.Done()
 			logger.Debugf("Starting the REST API server on %s", c.gs.Flags.Address)
+			if c.gs.Flags.ProfilingEnabled {
+				logger.Debugf("Profiling exposed on http://%s/debug/pprof/", c.gs.Flags.Address)
+			}
 			if aerr := srv.ListenAndServe(); aerr != nil && !errors.Is(aerr, http.ErrServerClosed) {
 				// Only exit k6 if the user has explicitly set the REST API address
 				if cmd.Flags().Lookup("address").Changed {
@@ -254,7 +341,7 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) (err error) {
 	}
 
 	printExecutionDescription(
-		c.gs, "local", args[0], "", conf, execScheduler.GetState().ExecutionTuple, executionPlan, outputs,
+		c.gs, "local", args[0], "", conf, executionState.ExecutionTuple, executionPlan, outputs,
 	)
 
 	// Trap Interrupts, SIGINTs and SIGTERMs.
@@ -300,9 +387,17 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) (err error) {
 		}()
 	}
 
+	waitInitDone()
+
+	waitTestStartDone := emitEvent(&event.Event{Type: event.TestStart})
+	waitTestStartDone()
+
 	// Start the test! However, we won't immediately return if there was an
 	// error, we still have things to do.
 	err = execScheduler.Run(globalCtx, runCtx, samples)
+
+	waitTestEndDone := emitEvent(&event.Event{Type: event.TestEnd})
+	defer waitTestEndDone()
 
 	// Init has passed successfully, so unless disabled, make sure we send a
 	// usage report after the context is done.
@@ -313,7 +408,8 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) (err error) {
 			reportCtx, reportCancel := context.WithTimeout(globalCtx, 3*time.Second)
 			defer reportCancel()
 			logger.Debug("Sending usage report...")
-			if rerr := reportUsage(reportCtx, execScheduler); rerr != nil {
+
+			if rerr := reportUsage(reportCtx, execScheduler, test); rerr != nil {
 				logger.WithError(rerr).Debug("Error sending usage report")
 			} else {
 				logger.Debug("Usage report sent successfully")
@@ -323,7 +419,7 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) (err error) {
 
 	// Check what the execScheduler.Run() error is.
 	if err != nil {
-		err = common.UnwrapGojaInterruptedError(err)
+		err = common.UnwrapSobekInterruptedError(err)
 		logger.WithError(err).Debug("Test finished with an error")
 		return err
 	}
@@ -347,9 +443,29 @@ func (c *cmdRun) flagSet() *pflag.FlagSet {
 	return flags
 }
 
+func (c *cmdRun) setupTracerProvider(ctx context.Context, test *loadedAndConfiguredTest) error {
+	ro := test.preInitState.RuntimeOptions
+	if ro.TracesOutput.String == "none" {
+		test.preInitState.TracerProvider = trace.NewNoopTracerProvider()
+		return nil
+	}
+
+	tp, err := trace.TracerProviderFromConfigLine(ctx, ro.TracesOutput.String)
+	if err != nil {
+		return err
+	}
+	test.preInitState.TracerProvider = tp
+
+	return nil
+}
+
 func getCmdRun(gs *state.GlobalState) *cobra.Command {
 	c := &cmdRun{
 		gs: gs,
+		loadConfiguredTest: func(cmd *cobra.Command, args []string) (*loadedAndConfiguredTest, execution.Controller, error) {
+			test, err := loadAndConfigureLocalTest(gs, cmd, args, getConfig)
+			return test, local.NewController(), err
+		},
 	}
 
 	exampleText := getExampleText(gs, `
@@ -387,39 +503,6 @@ a commandline interface for interacting with it.`,
 	runCmd.Flags().AddFlagSet(c.flagSet())
 
 	return runCmd
-}
-
-func reportUsage(ctx context.Context, execScheduler *execution.Scheduler) error {
-	execState := execScheduler.GetState()
-	executorConfigs := execScheduler.GetExecutorConfigs()
-
-	executors := make(map[string]int)
-	for _, ec := range executorConfigs {
-		executors[ec.GetType()]++
-	}
-
-	body, err := json.Marshal(map[string]interface{}{
-		"k6_version": consts.Version,
-		"executors":  executors,
-		"vus_max":    execState.GetInitializedVUsCount(),
-		"iterations": execState.GetFullIterationCount(),
-		"duration":   execState.GetCurrentTestRunDuration().String(),
-		"goos":       runtime.GOOS,
-		"goarch":     runtime.GOARCH,
-	})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://reports.k6.io/", bytes.NewBuffer(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	res, err := http.DefaultClient.Do(req)
-	if err == nil {
-		_ = res.Body.Close()
-	}
-	return err
 }
 
 func handleSummaryResult(fs fsext.Fs, stdOut, stdErr io.Writer, result map[string]io.Reader) error {

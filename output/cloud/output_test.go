@@ -20,7 +20,7 @@ import (
 	"go.k6.io/k6/metrics"
 	"go.k6.io/k6/output"
 	cloudv2 "go.k6.io/k6/output/cloud/expv2"
-	cloudv1 "go.k6.io/k6/output/cloud/v1"
+	"go.k6.io/k6/usage"
 	"gopkg.in/guregu/null.v3"
 )
 
@@ -95,14 +95,15 @@ func TestOutputCreateTestWithConfigOverwrite(t *testing.T) {
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/tests":
-			fmt.Fprintf(w, `{
-"reference_id": "cloud-create-test",
+			_, err := fmt.Fprintf(w, `{
+"reference_id": "12345",
 "config": {
 	"metricPushInterval": "10ms",
-	"aggregationPeriod": "30ms"
+	"aggregationPeriod": "40s"
 }
 }`)
-		case "/v1/tests/cloud-create-test":
+			require.NoError(t, err)
+		case "/v1/tests/12345":
 			w.WriteHeader(http.StatusOK)
 		default:
 			http.Error(w, "not expected path", http.StatusInternalServerError)
@@ -121,12 +122,13 @@ func TestOutputCreateTestWithConfigOverwrite(t *testing.T) {
 			SystemTags: &metrics.DefaultSystemTagSet,
 		},
 		ScriptPath: &url.URL{Path: "/script.js"},
+		Usage:      usage.New(),
 	})
 	require.NoError(t, err)
 	require.NoError(t, out.Start())
 
 	assert.Equal(t, types.NullDurationFrom(10*time.Millisecond), out.config.MetricPushInterval)
-	assert.Equal(t, types.NullDurationFrom(30*time.Millisecond), out.config.AggregationPeriod)
+	assert.Equal(t, types.NullDurationFrom(40*time.Second), out.config.AggregationPeriod)
 
 	// Assert that it overwrites only the provided values
 	expTimeout := types.NewNullDuration(60*time.Second, false)
@@ -147,10 +149,11 @@ func TestOutputStartVersionError(t *testing.T) {
 			"K6_CLOUD_API_VERSION": "99",
 		},
 		ScriptPath: &url.URL{Path: "/script.js"},
+		Usage:      usage.New(),
 	})
 	require.NoError(t, err)
 
-	o.referenceID = "123"
+	o.testRunID = "123"
 	err = o.startVersionedOutput()
 	require.ErrorContains(t, err, "v99 is an unexpected version")
 }
@@ -159,8 +162,8 @@ func TestOutputStartVersionedOutputV2(t *testing.T) {
 	t.Parallel()
 
 	o := Output{
-		logger:      testutils.NewLogger(t),
-		referenceID: "123",
+		logger:    testutils.NewLogger(t),
+		testRunID: "123",
 		config: cloudapi.Config{
 			APIVersion:            null.IntFrom(2),
 			Host:                  null.StringFrom("fake-cloud-url"),
@@ -170,6 +173,7 @@ func TestOutputStartVersionedOutputV2(t *testing.T) {
 			AggregationPeriod:  types.NullDurationFrom(1 * time.Hour),
 			MetricPushInterval: types.NullDurationFrom(1 * time.Hour),
 		},
+		usage: usage.New(),
 	}
 
 	o.client = cloudapi.NewClient(
@@ -182,29 +186,25 @@ func TestOutputStartVersionedOutputV2(t *testing.T) {
 	assert.True(t, ok)
 }
 
-func TestOutputStartVersionedOutputV1(t *testing.T) {
+func TestOutputStartVersionedOutputV1Error(t *testing.T) {
 	t.Parallel()
 
 	o := Output{
-		referenceID: "123",
+		testRunID: "123",
 		config: cloudapi.Config{
 			APIVersion: null.IntFrom(1),
-			// Here, we are enabling but silencing the related async op
-			MetricPushInterval: types.NullDurationFrom(1 * time.Hour),
 		},
+		usage: usage.New(),
 	}
 
 	err := o.startVersionedOutput()
-	require.NoError(t, err)
-
-	_, ok := o.versionedOutput.(*cloudv1.Output)
-	assert.True(t, ok)
+	assert.ErrorContains(t, err, "not supported anymore")
 }
 
-func TestOutputStartWithReferenceID(t *testing.T) {
+func TestOutputStartWithTestRunID(t *testing.T) {
 	t.Parallel()
 
-	handler := func(w http.ResponseWriter, r *http.Request) {
+	handler := func(_ http.ResponseWriter, _ *http.Request) {
 		// no calls are expected to the cloud service when
 		// the reference ID is passed
 		t.Error("got unexpected call")
@@ -216,12 +216,13 @@ func TestOutputStartWithReferenceID(t *testing.T) {
 		Logger: testutils.NewLogger(t),
 		Environment: map[string]string{
 			"K6_CLOUD_HOST":        ts.URL,
-			"K6_CLOUD_PUSH_REF_ID": "my-passed-id",
+			"K6_CLOUD_PUSH_REF_ID": "12345",
 		},
 		ScriptOptions: lib.Options{
 			SystemTags: &metrics.DefaultSystemTagSet,
 		},
 		ScriptPath: &url.URL{Path: "/script.js"},
+		Usage:      usage.New(),
 	})
 	require.NoError(t, err)
 	require.NoError(t, out.Start())
@@ -233,13 +234,13 @@ func TestCloudOutputDescription(t *testing.T) {
 
 	t.Run("WithTestRunDetails", func(t *testing.T) {
 		t.Parallel()
-		o := Output{referenceID: "74"}
+		o := Output{testRunID: "74"}
 		o.config.TestRunDetails = null.StringFrom("my-custom-string")
 		assert.Equal(t, "cloud (my-custom-string)", o.Description())
 	})
 	t.Run("WithWebAppURL", func(t *testing.T) {
 		t.Parallel()
-		o := Output{referenceID: "74"}
+		o := Output{testRunID: "74"}
 		o.config.WebAppURL = null.StringFrom("mywebappurl.com")
 		assert.Equal(t, "cloud (mywebappurl.com/runs/74)", o.Description())
 	})
@@ -252,7 +253,7 @@ func TestOutputStopWithTestError(t *testing.T) {
 
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/v1/tests/test-ref-id-1234":
+		case "/v1/tests/1234":
 			b, err := io.ReadAll(r.Body)
 			require.NoError(t, err)
 
@@ -282,7 +283,7 @@ func TestOutputStopWithTestError(t *testing.T) {
 	require.NoError(t, err)
 
 	calledStopFn := false
-	out.referenceID = "test-ref-id-1234"
+	out.testRunID = "1234"
 	out.versionedOutput = versionedOutputMock{
 		callback: func(fn string) {
 			if fn == "StopWithTestError" {
@@ -353,7 +354,7 @@ func (o versionedOutputMock) Start() error {
 	return nil
 }
 
-func (o versionedOutputMock) StopWithTestError(testRunErr error) error {
+func (o versionedOutputMock) StopWithTestError(_ error) error {
 	o.callback("StopWithTestError")
 	return nil
 }
@@ -362,10 +363,10 @@ func (o versionedOutputMock) SetTestRunStopCallback(_ func(error)) {
 	o.callback("SetTestRunStopCallback")
 }
 
-func (o versionedOutputMock) SetReferenceID(id string) {
-	o.callback("SetReferenceID")
+func (o versionedOutputMock) SetTestRunID(_ string) {
+	o.callback("SetTestRunID")
 }
 
-func (o versionedOutputMock) AddMetricSamples(samples []metrics.SampleContainer) {
+func (o versionedOutputMock) AddMetricSamples(_ []metrics.SampleContainer) {
 	o.callback("AddMetricSamples")
 }

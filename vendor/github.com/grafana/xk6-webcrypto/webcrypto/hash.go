@@ -11,15 +11,21 @@ import (
 // hash.Hash instance.
 func getHashFn(name string) (func() hash.Hash, bool) {
 	switch name {
-	case Sha1:
+	case SHA1:
 		return crypto.SHA1.New, true
-	case Sha256:
+	case SHA256:
 		return crypto.SHA256.New, true
-	case Sha384:
+	case SHA384:
 		return crypto.SHA384.New, true
-	case Sha512:
+	case SHA512:
 		return crypto.SHA512.New, true
 	default:
 		return nil, false
 	}
+}
+
+// hasHash an internal interface that helps us to identify
+// if a given object has a hash method.
+type hasHash interface {
+	hash() string
 }

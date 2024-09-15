@@ -170,7 +170,7 @@ type ConstantArrivalRate struct {
 var _ lib.Executor = &ConstantArrivalRate{}
 
 // Init values needed for the execution
-func (car *ConstantArrivalRate) Init(ctx context.Context) error {
+func (car *ConstantArrivalRate) Init(_ context.Context) error {
 	// err should always be nil, because Init() won't be called for executors
 	// with no work, as determined by their config's HasWork() method.
 	et, err := car.BaseExecutor.executionState.ExecutionTuple.GetNewExecutionTupleFromValue(car.config.MaxVUs.Int64)
@@ -191,7 +191,7 @@ func (car *ConstantArrivalRate) Init(ctx context.Context) error {
 // This will allow us to implement https://github.com/k6io/k6/issues/1386
 // and things like all of the TODOs below in one place only.
 //
-//nolint:funlen,cyclop
+//nolint:funlen
 func (car ConstantArrivalRate) Run(parentCtx context.Context, out chan<- metrics.SampleContainer) (err error) {
 	gracefulStop := car.config.GetGracefulStop()
 	duration := car.config.Duration.TimeDuration()

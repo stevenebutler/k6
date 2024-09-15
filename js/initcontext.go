@@ -4,10 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"path/filepath"
 	"strings"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"github.com/sirupsen/logrus"
 
 	"go.k6.io/k6/js/modules"
@@ -17,26 +16,13 @@ import (
 )
 
 const cantBeUsedOutsideInitContextMsg = `the "%s" function is only available in the init stage ` +
-	`(i.e. the global scope), see https://k6.io/docs/using-k6/test-life-cycle for more information`
+	`(i.e. the global scope), see https://grafana.com/docs/k6/latest/using-k6/test-lifecycle/ for more information`
 
 // openImpl implements openImpl() in the init context and will read and return the
 // contents of a file. If the second argument is "b" it returns an ArrayBuffer
 // instance, otherwise a string representation.
-func openImpl(rt *goja.Runtime, mr *modules.ModuleResolver, fs fsext.Fs, basePWD *url.URL, filename string, args ...string) (goja.Value, error) {
-	// Here IsAbs should be enough but unfortunately it doesn't handle absolute paths starting from
-	// the current drive on windows like `\users\noname\...`. Also it makes it more easy to test and
-	// will probably be need for archive execution under windows if always consider '/...' as an
-	// absolute path.
-	if filename[0] != '/' && filename[0] != '\\' && !filepath.IsAbs(filename) {
-		filename = filepath.Join(basePWD.Path, filename)
-	}
-	filename = filepath.Clean(filename)
-
-	if filename[0:1] != fsext.FilePathSeparator {
-		filename = fsext.FilePathSeparator + filename
-	}
-
-	data, err := readFile(fs, filename)
+func openImpl(rt *sobek.Runtime, mr *modules.ModuleResolver, fs fsext.Fs, basePWD *url.URL, filename string, args ...string) (sobek.Value, error) {
+	data, err := readFile(fs, fsext.Abs(basePWD.Path, filename))
 	if err != nil {
 		return nil, err
 	}

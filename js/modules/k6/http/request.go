@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"gopkg.in/guregu/null.v3"
 
 	"go.k6.io/k6/js/common"
@@ -21,20 +21,22 @@ import (
 )
 
 // ErrHTTPForbiddenInInitContext is used when a http requests was made in the init context
-var ErrHTTPForbiddenInInitContext = common.NewInitContextError("Making http requests in the init context is not supported")
+var ErrHTTPForbiddenInInitContext = common.NewInitContextError(
+	"Making http requests in the init context is not supported")
 
 // ErrBatchForbiddenInInitContext is used when batch was made in the init context
-var ErrBatchForbiddenInInitContext = common.NewInitContextError("Using batch in the init context is not supported")
+var ErrBatchForbiddenInInitContext = common.NewInitContextError(
+	"Using batch in the init context is not supported")
 
-func (c *Client) getMethodClosure(method string) func(url goja.Value, args ...goja.Value) (*Response, error) {
-	return func(url goja.Value, args ...goja.Value) (*Response, error) {
+func (c *Client) getMethodClosure(method string) func(url sobek.Value, args ...sobek.Value) (*Response, error) {
+	return func(url sobek.Value, args ...sobek.Value) (*Response, error) {
 		return c.Request(method, url, args...)
 	}
 }
 
 // Request makes an http request of the provided `method` and returns a corresponding response by
-// taking goja.Values as arguments
-func (c *Client) Request(method string, url goja.Value, args ...goja.Value) (*Response, error) {
+// taking sobek.Values as arguments
+func (c *Client) Request(method string, url sobek.Value, args ...sobek.Value) (*Response, error) {
 	state := c.moduleInstance.vu.State()
 	if state == nil {
 		return nil, ErrHTTPForbiddenInInitContext
@@ -54,7 +56,7 @@ func (c *Client) Request(method string, url goja.Value, args ...goja.Value) (*Re
 	return c.responseFromHTTPext(resp), nil
 }
 
-func splitRequestArgs(args []goja.Value) (body interface{}, params goja.Value) {
+func splitRequestArgs(args []sobek.Value) (body interface{}, params sobek.Value) {
 	if len(args) > 0 {
 		body = args[0].Export()
 	}
@@ -82,7 +84,7 @@ func (c *Client) handleParseRequestError(err error) (*Response, error) {
 
 // asyncRequest makes an http request of the provided `method` and returns a promise. All the networking is done off
 // the event loop and the returned promise will be resolved with the response or rejected with an error
-func (c *Client) asyncRequest(method string, url goja.Value, args ...goja.Value) (*goja.Promise, error) {
+func (c *Client) asyncRequest(method string, url sobek.Value, args ...sobek.Value) (*sobek.Promise, error) {
 	state := c.moduleInstance.vu.State()
 	if c.moduleInstance.vu.State() == nil {
 		return nil, ErrHTTPForbiddenInInitContext
@@ -122,10 +124,14 @@ func (c *Client) asyncRequest(method string, url goja.Value, args ...goja.Value)
 
 // processResponse stores the body as an ArrayBuffer if indicated by
 // respType. This is done here instead of in httpext.readResponseBody to avoid
-// a reverse dependency on js/common or goja.
+// a reverse dependency on js/common or sobek.
 func (c *Client) processResponse(resp *httpext.Response, respType httpext.ResponseType) {
 	if respType == httpext.ResponseTypeBinary && resp.Body != nil {
-		resp.Body = c.moduleInstance.vu.Runtime().NewArrayBuffer(resp.Body.([]byte))
+		b, ok := resp.Body.([]byte)
+		if !ok {
+			panic("got an unexpected type for the response body, only []byte is accepted")
+		}
+		resp.Body = c.moduleInstance.vu.Runtime().NewArrayBuffer(b)
 	}
 }
 
@@ -137,7 +143,7 @@ func (c *Client) responseFromHTTPext(resp *httpext.Response) *Response {
 //
 //nolint:gocyclo, cyclop, funlen, gocognit
 func (c *Client) parseRequest(
-	method string, reqURL, body interface{}, params goja.Value,
+	method string, reqURL, body interface{}, params sobek.Value,
 ) (*httpext.ParsedHTTPRequest, error) {
 	rt := c.moduleInstance.vu.Runtime()
 	state := c.moduleInstance.vu.State()
@@ -145,7 +151,7 @@ func (c *Client) parseRequest(
 		return nil, ErrHTTPForbiddenInInitContext
 	}
 
-	if urlJSValue, ok := reqURL.(goja.Value); ok {
+	if urlJSValue, ok := reqURL.(sobek.Value); ok {
 		reqURL = urlJSValue.Export()
 	}
 	u, err := httpext.ToURL(reqURL)
@@ -247,7 +253,7 @@ func (c *Client) parseRequest(
 
 	if body != nil {
 		switch data := body.(type) {
-		case map[string]goja.Value:
+		case map[string]sobek.Value:
 			// TODO: fix forms submission and serialization in k6/html before fixing this..
 			newData := map[string]interface{}{}
 			for k, v := range data {
@@ -256,7 +262,7 @@ func (c *Client) parseRequest(
 			if err := handleObjectBody(newData); err != nil {
 				return nil, err
 			}
-		case goja.ArrayBuffer:
+		case sobek.ArrayBuffer:
 			result.Body = bytes.NewBuffer(data.Bytes())
 		case map[string]interface{}:
 			if err := handleObjectBody(data); err != nil {
@@ -277,14 +283,15 @@ func (c *Client) parseRequest(
 		result.ActiveJar = state.CookieJar
 	}
 
-	// TODO: ditch goja.Value, reflections and Object and use a simple go map and type assertions?
-	if params != nil && !goja.IsUndefined(params) && !goja.IsNull(params) {
+	// TODO: ditch sobek.Value, reflections and Object and use a simple go map and type assertions?
+	//nolint: nestif
+	if params != nil && !sobek.IsUndefined(params) && !sobek.IsNull(params) {
 		params := params.ToObject(rt)
 		for _, k := range params.Keys() {
 			switch k {
 			case "cookies":
 				cookiesV := params.Get(k)
-				if goja.IsUndefined(cookiesV) || goja.IsNull(cookiesV) {
+				if sobek.IsUndefined(cookiesV) || sobek.IsNull(cookiesV) {
 					continue
 				}
 				cookies := cookiesV.ToObject(rt)
@@ -293,7 +300,7 @@ func (c *Client) parseRequest(
 				}
 				for _, key := range cookies.Keys() {
 					cookieV := cookies.Get(key)
-					if goja.IsUndefined(cookieV) || goja.IsNull(cookieV) {
+					if sobek.IsUndefined(cookieV) || sobek.IsNull(cookieV) {
 						continue
 					}
 					switch cookieV.ExportType() {
@@ -314,7 +321,7 @@ func (c *Client) parseRequest(
 				}
 			case "headers":
 				headersV := params.Get(k)
-				if goja.IsUndefined(headersV) || goja.IsNull(headersV) {
+				if sobek.IsUndefined(headersV) || sobek.IsNull(headersV) {
 					continue
 				}
 				headers := headersV.ToObject(rt)
@@ -330,11 +337,10 @@ func (c *Client) parseRequest(
 				}
 			case "jar":
 				jarV := params.Get(k)
-				if goja.IsUndefined(jarV) || goja.IsNull(jarV) {
+				if sobek.IsUndefined(jarV) || sobek.IsNull(jarV) {
 					continue
 				}
-				switch v := jarV.Export().(type) {
-				case *CookieJar:
+				if v, ok := jarV.Export().(*CookieJar); ok {
 					result.ActiveJar = v.Jar
 				}
 			case "compression":
@@ -457,7 +463,7 @@ func (c *Client) prepareBatchObject(requests map[string]interface{}) (
 
 // Batch makes multiple simultaneous HTTP requests. The provideds reqsV should be an array of request
 // objects. Batch returns an array of responses and/or error
-func (c *Client) Batch(reqsV ...goja.Value) (interface{}, error) {
+func (c *Client) Batch(reqsV ...sobek.Value) (interface{}, error) {
 	state := c.moduleInstance.vu.State()
 	if state == nil {
 		return nil, ErrBatchForbiddenInInitContext
@@ -495,12 +501,16 @@ func (c *Client) Batch(reqsV ...goja.Value) (interface{}, error) {
 	errs := httpext.MakeBatchRequests(
 		c.moduleInstance.vu.Context(), state, batchReqs, reqCount,
 		int(state.Options.Batch.Int64), int(state.Options.BatchPerHost.Int64),
-		c.processResponse,
 	)
 
 	for i := 0; i < reqCount; i++ {
 		if e := <-errs; e != nil && err == nil { // Save only the first error
 			err = e
+		}
+	}
+	for _, req := range batchReqs {
+		if req.Response != nil {
+			c.processResponse(req.Response, req.ParsedHTTPRequest.ResponseType)
 		}
 	}
 	return results, err
@@ -511,7 +521,7 @@ func (c *Client) parseBatchRequest(key interface{}, val interface{}) (*httpext.P
 		method       = http.MethodGet
 		ok           bool
 		body, reqURL interface{}
-		params       goja.Value
+		params       sobek.Value
 		rt           = c.moduleInstance.vu.Runtime()
 	)
 
@@ -565,8 +575,7 @@ func (c *Client) parseBatchRequest(key interface{}, val interface{}) (*httpext.P
 
 func requestContainsFile(data map[string]interface{}) bool {
 	for _, v := range data {
-		switch v.(type) {
-		case FileData:
+		if _, ok := v.(FileData); ok {
 			return true
 		}
 	}

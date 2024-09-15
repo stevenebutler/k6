@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"go.k6.io/k6/lib/testutils"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/guregu/null.v3"
@@ -340,6 +342,7 @@ var configMapTestCases = []configMapTestCase{
 	},
 	{`{"carrival": {"executor": "constant-arrival-rate", "rate": 10, "duration": "10m", "preAllocatedVUs": 20, "maxVUs": 30}}`, exp{}},
 	{`{"carrival": {"executor": "constant-arrival-rate", "rate": 10, "duration": "10m", "preAllocatedVUs": 20, "maxVUs": 30, "timeUnit": "-1s"}}`, exp{validationError: true}},
+	{`{"carrival": {"executor": "constant-arrival-rate", "rate": 10, "duration": "10m", "preAllocatedVUs": 20, "maxVUs": 30, "timeUnit": "0s"}}`, exp{validationError: true}},
 	{
 		`{"carrival": {"executor": "constant-arrival-rate", "rate": 10, "duration": "10m", "preAllocatedVUs": 20}}`,
 		exp{custom: func(t *testing.T, cm lib.ScenarioConfigs) {
@@ -403,6 +406,7 @@ var configMapTestCases = []configMapTestCase{
 	{`{"varrival": {"executor": "ramping-arrival-rate", "preAllocatedVUs": 20, "maxVUs": 50}}`, exp{validationError: true}},
 	{`{"varrival": {"executor": "ramping-arrival-rate", "preAllocatedVUs": 20, "maxVUs": 50, "stages": []}}`, exp{validationError: true}},
 	{`{"varrival": {"executor": "ramping-arrival-rate", "preAllocatedVUs": 20, "maxVUs": 50, "stages": [{"duration": "5m", "target": 10}], "timeUnit": "-1s"}}`, exp{validationError: true}},
+	{`{"varrival": {"executor": "ramping-arrival-rate", "preAllocatedVUs": 20, "maxVUs": 50, "stages": [{"duration": "5m", "target": 10}], "timeUnit": "0s"}}`, exp{validationError: true}},
 	{`{"varrival": {"executor": "ramping-arrival-rate", "preAllocatedVUs": 30, "maxVUs": 20, "stages": [{"duration": "5m", "target": 10}]}}`, exp{validationError: true}},
 	// TODO: more tests of mixed executors and execution plans
 
@@ -427,7 +431,7 @@ func TestConfigMapParsingAndValidation(t *testing.T) {
 		tc := tc
 		t.Run(fmt.Sprintf("TestCase#%d", i), func(t *testing.T) {
 			t.Parallel()
-			t.Logf(tc.rawJSON)
+			t.Log(tc.rawJSON)
 			var result lib.ScenarioConfigs
 			err := json.Unmarshal([]byte(tc.rawJSON), &result)
 			if tc.expected.parseError {
@@ -490,7 +494,7 @@ func TestArchiveRoundTripExecutorConfig(t *testing.T) {
 		Data:        []byte(`// a contents`),
 		PwdURL:      &url.URL{Scheme: "file", Path: "/path/to"},
 		Filesystems: map[string]fsext.Fs{
-			"file": makeMemMapFs(t, map[string][]byte{
+			"file": testutils.MakeMemMapFs(t, map[string][]byte{
 				"/path/to/a.js": []byte(`// a contents`),
 			}),
 		},
@@ -508,13 +512,4 @@ func TestArchiveRoundTripExecutorConfig(t *testing.T) {
 	require.True(t, ok)
 
 	assert.EqualValues(t, execCfg, execCfg2)
-}
-
-// copied from lib/archive_test.go
-func makeMemMapFs(t *testing.T, input map[string][]byte) fsext.Fs {
-	fs := fsext.NewMemMapFs()
-	for path, data := range input {
-		require.NoError(t, fsext.WriteFile(fs, path, data, 0o644))
-	}
-	return fs
 }

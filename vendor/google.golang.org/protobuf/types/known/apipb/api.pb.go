@@ -323,7 +323,7 @@ func (x *Method) GetSyntax() typepb.Syntax {
 // The mixin construct implies that all methods in `AccessControl` are
 // also declared with same name and request/response types in
 // `Storage`. A documentation generator or annotation processor will
-// see the effective `Storage.GetAcl` method after inheriting
+// see the effective `Storage.GetAcl` method after inherting
 // documentation and annotations as follows:
 //
 //	service Storage {
@@ -488,7 +488,7 @@ func file_google_protobuf_api_proto_rawDescGZIP() []byte {
 }
 
 var file_google_protobuf_api_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
-var file_google_protobuf_api_proto_goTypes = []interface{}{
+var file_google_protobuf_api_proto_goTypes = []any{
 	(*Api)(nil),                           // 0: google.protobuf.Api
 	(*Method)(nil),                        // 1: google.protobuf.Method
 	(*Mixin)(nil),                         // 2: google.protobuf.Mixin
@@ -517,7 +517,7 @@ func file_google_protobuf_api_proto_init() {
 		return
 	}
 	if !protoimpl.UnsafeEnabled {
-		file_google_protobuf_api_proto_msgTypes[0].Exporter = func(v interface{}, i int) interface{} {
+		file_google_protobuf_api_proto_msgTypes[0].Exporter = func(v any, i int) any {
 			switch v := v.(*Api); i {
 			case 0:
 				return &v.state
@@ -529,7 +529,7 @@ func file_google_protobuf_api_proto_init() {
 				return nil
 			}
 		}
-		file_google_protobuf_api_proto_msgTypes[1].Exporter = func(v interface{}, i int) interface{} {
+		file_google_protobuf_api_proto_msgTypes[1].Exporter = func(v any, i int) any {
 			switch v := v.(*Method); i {
 			case 0:
 				return &v.state
@@ -541,7 +541,7 @@ func file_google_protobuf_api_proto_init() {
 				return nil
 			}
 		}
-		file_google_protobuf_api_proto_msgTypes[2].Exporter = func(v interface{}, i int) interface{} {
+		file_google_protobuf_api_proto_msgTypes[2].Exporter = func(v any, i int) any {
 			switch v := v.(*Mixin); i {
 			case 0:
 				return &v.state

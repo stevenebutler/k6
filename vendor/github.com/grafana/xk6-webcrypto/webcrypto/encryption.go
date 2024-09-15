@@ -3,7 +3,7 @@ package webcrypto
 import (
 	"fmt"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 )
 
 // Encrypter is an interface for encrypting data.
@@ -23,14 +23,14 @@ type EncryptDecrypter interface {
 }
 
 // newEncryptDecrypter instantiates an EncryptDecrypter based on the provided
-// algorithm and parameters `goja.Value`.
+// algorithm and parameters `sobek.Value`.
 //
 // The returned instance can be used to encrypt/decrypt data using the
 // corresponding AES algorithm.
 func newEncryptDecrypter(
-	rt *goja.Runtime,
+	rt *sobek.Runtime,
 	algorithm Algorithm,
-	params goja.Value,
+	params sobek.Value,
 ) (EncryptDecrypter, error) {
 	var ed EncryptDecrypter
 	var paramsObjectName string
@@ -38,21 +38,21 @@ func newEncryptDecrypter(
 
 	switch algorithm.Name {
 	case AESCbc:
-		ed = new(AesCbcParams)
+		ed = new(AESCBCParams)
 		paramsObjectName = "AesCbcParams"
 	case AESCtr:
-		ed = new(AesCtrParams)
+		ed = new(AESCTRParams)
 		paramsObjectName = "AesCtrParams"
 	case AESGcm:
-		ed = new(AesGcmParams)
+		ed = new(AESGCMParams)
 		paramsObjectName = "AesGcmParams"
 	default:
-		return nil, NewError(0, NotSupportedError, "unsupported algorithm")
+		return nil, NewError(NotSupportedError, "unsupported algorithm")
 	}
 
 	if err = rt.ExportTo(params, ed); err != nil {
 		errMsg := fmt.Sprintf("invalid algorithm parameters, unable to interpret as %sParams object", paramsObjectName)
-		return nil, NewError(0, SyntaxError, errMsg)
+		return nil, NewError(SyntaxError, errMsg)
 	}
 
 	return ed, nil

@@ -8,12 +8,13 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/sirupsen/logrus"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/metrics"
 
 	protov1 "github.com/golang/protobuf/proto" //nolint:staticcheck,nolintlint // this is the old v1 version
-	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -25,22 +26,37 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
-// Request represents a gRPC request.
-type Request struct {
-	MethodDescriptor protoreflect.MethodDescriptor
-	TagsAndMeta      *metrics.TagsAndMeta
-	Message          []byte
+// InvokeRequest represents a unary gRPC request.
+type InvokeRequest struct {
+	Method                 string
+	MethodDescriptor       protoreflect.MethodDescriptor
+	Timeout                time.Duration
+	TagsAndMeta            *metrics.TagsAndMeta
+	DiscardResponseMessage bool
+	Message                []byte
+	Metadata               metadata.MD
 }
 
-// Response represents a gRPC response.
-type Response struct {
+// InvokeResponse represents a gRPC response.
+type InvokeResponse struct {
 	Message  interface{}
 	Error    interface{}
 	Headers  map[string][]string
 	Trailers map[string][]string
 	Status   codes.Code
+}
+
+// StreamRequest represents a gRPC stream request.
+type StreamRequest struct {
+	Method                 string
+	MethodDescriptor       protoreflect.MethodDescriptor
+	Timeout                time.Duration
+	DiscardResponseMessage bool
+	TagsAndMeta            *metrics.TagsAndMeta
+	Metadata               metadata.MD
 }
 
 type clientConnCloser interface {
@@ -60,6 +76,7 @@ func DefaultOptions(getState func() *lib.State) []grpc.DialOption {
 		return getState().Dialer.DialContext(ctx, "tcp", addr)
 	}
 
+	//nolint:staticcheck // see https://github.com/grafana/k6/issues/3699
 	return []grpc.DialOption{
 		grpc.WithBlock(),
 		grpc.FailOnNonTempDialError(true),
@@ -71,6 +88,7 @@ func DefaultOptions(getState func() *lib.State) []grpc.DialOption {
 
 // Dial establish a gRPC connection.
 func Dial(ctx context.Context, addr string, options ...grpc.DialOption) (*Conn, error) {
+	//nolint:staticcheck // see https://github.com/grafana/k6/issues/3699
 	conn, err := grpc.DialContext(ctx, addr, options...)
 	if err != nil {
 		return nil, err
@@ -89,14 +107,13 @@ func (c *Conn) Reflect(ctx context.Context) (*descriptorpb.FileDescriptorSet, er
 // Invoke executes a unary gRPC request.
 func (c *Conn) Invoke(
 	ctx context.Context,
-	url string,
-	md metadata.MD,
-	req Request,
+	req InvokeRequest,
 	opts ...grpc.CallOption,
-) (*Response, error) {
-	if url == "" {
+) (*InvokeResponse, error) {
+	if req.Method == "" {
 		return nil, fmt.Errorf("url is required")
 	}
+
 	if req.MethodDescriptor == nil {
 		return nil, fmt.Errorf("request method descriptor is required")
 	}
@@ -104,7 +121,13 @@ func (c *Conn) Invoke(
 		return nil, fmt.Errorf("request message is required")
 	}
 
-	ctx = metadata.NewOutgoingContext(ctx, md)
+	if req.Timeout != time.Duration(0) {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, req.Timeout)
+		defer cancel()
+	}
+
+	ctx = metadata.NewOutgoingContext(ctx, req.Metadata)
 
 	reqdm := dynamicpb.NewMessage(req.MethodDescriptor.Input())
 	if err := protojson.Unmarshal(req.Message, reqdm); err != nil {
@@ -113,16 +136,22 @@ func (c *Conn) Invoke(
 
 	ctx = withRPCState(ctx, &rpcState{tagsAndMeta: req.TagsAndMeta})
 
-	resp := dynamicpb.NewMessage(req.MethodDescriptor.Output())
+	var resp *dynamicpb.Message
+	if req.DiscardResponseMessage {
+		resp = dynamicpb.NewMessage((&emptypb.Empty{}).ProtoReflect().Descriptor())
+	} else {
+		resp = dynamicpb.NewMessage(req.MethodDescriptor.Output())
+	}
+
 	header, trailer := metadata.New(nil), metadata.New(nil)
 
 	copts := make([]grpc.CallOption, 0, len(opts)+2)
 	copts = append(copts, opts...)
 	copts = append(copts, grpc.Header(&header), grpc.Trailer(&trailer))
 
-	err := c.raw.Invoke(ctx, url, reqdm, resp, copts...)
+	err := c.raw.Invoke(ctx, req.Method, reqdm, resp, copts...)
 
-	response := Response{
+	response := InvokeResponse{
 		Headers:  header,
 		Trailers: trailer,
 	}
@@ -133,7 +162,7 @@ func (c *Conn) Invoke(
 		sterr := status.Convert(err)
 		response.Status = sterr.Code()
 
-		// (rogchap) when you access a JSON property in goja, you are actually accessing the underling
+		// (rogchap) when you access a JSON property in Sobek, you are actually accessing the underling
 		// Go type (struct, map, slice etc); because these are dynamic messages the Unmarshaled JSON does
 		// not map back to a "real" field or value (as a normal Go type would). If we don't marshal and then
 		// unmarshal back to a map, you will get "undefined" when accessing JSON properties, even when
@@ -145,27 +174,42 @@ func (c *Conn) Invoke(
 		response.Error = errMsg
 	}
 
-	if resp != nil {
-		// (rogchap) there is a lot of marshaling/unmarshaling here, but if we just pass the dynamic message
-		// the default Marshaller would be used, which would strip any zero/default values from the JSON.
-		// eg. given this message:
-		// message Point {
-		//    double x = 1;
-		// 	  double y = 2;
-		// 	  double z = 3;
-		// }
-		// and a value like this:
-		// msg := Point{X: 6, Y: 4, Z: 0}
-		// would result in JSON output:
-		// {"x":6,"y":4}
-		// rather than the desired:
-		// {"x":6,"y":4,"z":0}
-		raw, _ := marshaler.Marshal(resp)
-		msg := make(map[string]interface{})
-		_ = json.Unmarshal(raw, &msg)
+	if resp != nil && !req.DiscardResponseMessage {
+		msg, err := convert(marshaler, resp)
+		if err != nil {
+			return nil, fmt.Errorf("unable to convert response object to JSON: %w", err)
+		}
+
 		response.Message = msg
 	}
 	return &response, nil
+}
+
+// NewStream creates a new gRPC stream.
+func (c *Conn) NewStream(
+	ctx context.Context,
+	req StreamRequest,
+	opts ...grpc.CallOption,
+) (*Stream, error) {
+	ctx = metadata.NewOutgoingContext(ctx, req.Metadata)
+
+	ctx = withRPCState(ctx, &rpcState{tagsAndMeta: req.TagsAndMeta})
+
+	stream, err := c.raw.NewStream(ctx, &grpc.StreamDesc{
+		StreamName:    string(req.MethodDescriptor.Name()),
+		ServerStreams: req.MethodDescriptor.IsStreamingServer(),
+		ClientStreams: req.MethodDescriptor.IsStreamingClient(),
+	}, req.Method, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Stream{
+		raw:                    stream,
+		method:                 req.Method,
+		methodDescriptor:       req.MethodDescriptor,
+		discardResponseMessage: req.DiscardResponseMessage,
+	}, nil
 }
 
 // Close closes the underhood connection.

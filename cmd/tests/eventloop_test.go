@@ -113,7 +113,7 @@ func TestEventLoopDoesntCrossIterations(t *testing.T) {
 	eventLoopTest(t, script, func(logLines []string) {
 		require.Equal(t, []string{
 			"setTimeout 1 was stopped because the VU iteration was interrupted",
-			"just error\n\tat file:///-:13:4(15)\n", "1",
+			"just error\n\tat default (file:///-:13:5(14))\n", "1",
 		}, logLines)
 	})
 }
@@ -122,7 +122,7 @@ func eventLoopTest(t *testing.T, script []byte, testHandle func(logLines []strin
 	ts := NewGlobalTestState(t)
 	ts.CmdArgs = []string{"k6", "--quiet", "run", "-"}
 	ts.Stdin = bytes.NewBuffer(
-		append([]byte("import { setTimeout } from 'k6/experimental/timers';\n"), script...),
+		append([]byte("import { setTimeout } from 'k6/timers';\n"), script...),
 	)
 
 	cmd.ExecuteWithGlobalState(ts.GlobalState)

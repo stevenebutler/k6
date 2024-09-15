@@ -13,12 +13,14 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"go.k6.io/k6/lib/strvals"
 )
 
 // lokiHook is a Logrus hook for flushing to Loki.
 type lokiHook struct {
 	fallbackLogger logrus.FieldLogger
 	addr           string
+	headers        [][2]string
 	labels         [][2]string
 	ch             chan *logrus.Entry
 	limit          int
@@ -76,14 +78,14 @@ func LokiFromConfigLine(fallbackLogger logrus.FieldLogger, line string) (AsyncHo
 }
 
 func (h *lokiHook) parseArgs(line string) error {
-	tokens, err := tokenize(line)
+	tokens, err := strvals.Parse(line)
 	if err != nil {
 		return fmt.Errorf("error while parsing loki configuration %w", err)
 	}
 
 	for _, token := range tokens {
-		key := token.key
-		value := token.value
+		key := token.Key
+		value := token.Value
 
 		var err error
 		switch key {
@@ -125,6 +127,11 @@ func (h *lokiHook) parseArgs(line string) error {
 				h.labels = append(h.labels, [2]string{labelKey, value})
 
 				continue
+			} else if strings.HasPrefix(key, "header.") {
+				headerKey := strings.TrimPrefix(key, "header.")
+				h.headers = append(h.headers, [2]string{headerKey, value})
+
+				continue
 			}
 
 			return fmt.Errorf("unknown loki config key %s", key)
@@ -150,10 +157,13 @@ func (h *lokiHook) Listen(ctx context.Context) {
 		pushCh     = make(chan chan int64)
 	)
 
+	pushDone := make(chan struct{})
+	defer func() { <-pushDone }()
 	defer ticker.Stop()
 	defer close(pushCh)
 
-	go func() {
+	go func() { //nolint:contextcheck
+		defer close(pushDone)
 		oldLogs := make([]tmpMsg, 0, h.limit*2)
 		for ch := range pushCh {
 			msgsToPush, msgs = msgs, msgsToPush
@@ -332,6 +342,10 @@ func (h *lokiHook) push(b bytes.Buffer) error {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+
+	for _, header := range h.headers {
+		req.Header.Add(header[0], header[1])
+	}
 
 	res, err := h.client.Do(req)
 

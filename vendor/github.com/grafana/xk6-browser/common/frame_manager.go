@@ -7,7 +7,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/grafana/xk6-browser/api"
 	"github.com/grafana/xk6-browser/k6ext"
 	"github.com/grafana/xk6-browser/log"
 
@@ -163,15 +162,33 @@ func (m *FrameManager) frameAttached(frameID cdp.FrameID, parentFrameID cdp.Fram
 	}
 }
 
-func (m *FrameManager) frameDetached(frameID cdp.FrameID, reason cdppage.FrameDetachedReason) {
+func (m *FrameManager) frameDetached(frameID cdp.FrameID, reason cdppage.FrameDetachedReason) error {
 	m.logger.Debugf("FrameManager:frameDetached", "fmid:%d fid:%v", m.ID(), frameID)
 
-	frame := m.getFrameByID(frameID)
-	if frame == nil {
+	frame, ok := m.getFrameByID(frameID)
+	if !ok {
 		m.logger.Debugf("FrameManager:frameDetached:return",
 			"fmid:%d fid:%v cannot find frame",
 			m.ID(), frameID)
-		return
+		return nil
+	}
+
+	// This helps prevent an iframe and its child frames from being removed
+	// when the type of detach is a swap. After this detach event usually
+	// the iframe navigates, which requires the frames to be present for the
+	// navigate to work.
+	fs := m.page.getFrameSession(frameID)
+	if fs != nil {
+		m.logger.Debugf("FrameManager:frameDetached:sessionFound",
+			"fmid:%d fid:%v fsID1:%v fsID2:%v found session for frame",
+			m.ID(), frameID, fs.session.ID(), m.session.ID())
+
+		if fs.session.ID() != m.session.ID() {
+			m.logger.Debugf("FrameManager:frameDetached:notSameSession:return",
+				"fmid:%d fid:%v event session and frame session do not match",
+				m.ID(), frameID)
+			return nil
+		}
 	}
 
 	if reason == cdppage.FrameDetachedReasonSwap {
@@ -179,11 +196,10 @@ func (m *FrameManager) frameDetached(frameID cdp.FrameID, reason cdppage.FrameDe
 		// frame, we want to keep the current frame which is
 		// still referenced by the (incoming) remote frame, but
 		// remove all its child frames.
-		m.removeChildFramesRecursively(frame)
-		return
+		return m.removeChildFramesRecursively(frame)
 	}
 
-	m.removeFramesRecursively(frame)
+	return m.removeFramesRecursively(frame)
 }
 
 func (m *FrameManager) frameLifecycleEvent(frameID cdp.FrameID, event LifecycleEvent) {
@@ -191,8 +207,8 @@ func (m *FrameManager) frameLifecycleEvent(frameID cdp.FrameID, event LifecycleE
 		"fmid:%d fid:%v event:%s",
 		m.ID(), frameID, lifecycleEventToString[event])
 
-	frame := m.getFrameByID(frameID)
-	if frame != nil {
+	frame, ok := m.getFrameByID(frameID)
+	if ok {
 		frame.onLifecycleEvent(event)
 	}
 }
@@ -201,8 +217,8 @@ func (m *FrameManager) frameLoadingStarted(frameID cdp.FrameID) {
 	m.logger.Debugf("FrameManager:frameLoadingStarted",
 		"fmid:%d fid:%v", m.ID(), frameID)
 
-	frame := m.getFrameByID(frameID)
-	if frame != nil {
+	frame, ok := m.getFrameByID(frameID)
+	if ok {
 		frame.onLoadingStarted()
 	}
 }
@@ -211,8 +227,8 @@ func (m *FrameManager) frameLoadingStopped(frameID cdp.FrameID) {
 	m.logger.Debugf("FrameManager:frameLoadingStopped",
 		"fmid:%d fid:%v", m.ID(), frameID)
 
-	frame := m.getFrameByID(frameID)
-	if frame != nil {
+	frame, ok := m.getFrameByID(frameID)
+	if ok {
 		frame.onLoadingStopped()
 	}
 }
@@ -238,9 +254,14 @@ func (m *FrameManager) frameNavigated(frameID cdp.FrameID, parentFrameID cdp.Fra
 		m.ID(), frameID, parentFrameID, documentID, name, url, initial)
 
 	if frame != nil {
+		m.framesMu.Unlock()
 		for _, child := range frame.ChildFrames() {
-			m.removeFramesRecursively(child.(*Frame))
+			if err := m.removeFramesRecursively(child); err != nil {
+				m.framesMu.Lock()
+				return fmt.Errorf("removing child frames recursively: %w", err)
+			}
 		}
+		m.framesMu.Lock()
 	}
 
 	var mainFrame *Frame
@@ -389,28 +410,41 @@ func (m *FrameManager) frameRequestedNavigation(frameID cdp.FrameID, url string,
 	return nil
 }
 
-func (m *FrameManager) getFrameByID(id cdp.FrameID) *Frame {
+// getFrameByID finds a frame with id. If found, it returns the frame and true,
+// otherwise, it returns nil and false.
+func (m *FrameManager) getFrameByID(id cdp.FrameID) (*Frame, bool) {
 	m.framesMu.RLock()
 	defer m.framesMu.RUnlock()
-	return m.frames[id]
+
+	frame, ok := m.frames[id]
+
+	return frame, ok
 }
 
-func (m *FrameManager) removeChildFramesRecursively(frame *Frame) {
+func (m *FrameManager) removeChildFramesRecursively(frame *Frame) error {
 	for _, child := range frame.ChildFrames() {
-		m.removeFramesRecursively(child.(*Frame))
+		if err := m.removeFramesRecursively(child); err != nil {
+			return fmt.Errorf("removing child frames recursively: %w", err)
+		}
 	}
+
+	return nil
 }
 
-func (m *FrameManager) removeFramesRecursively(frame *Frame) {
+func (m *FrameManager) removeFramesRecursively(frame *Frame) error {
 	for _, child := range frame.ChildFrames() {
 		m.logger.Debugf("FrameManager:removeFramesRecursively",
 			"fmid:%d cfid:%v pfid:%v cfname:%s cfurl:%s",
 			m.ID(), child.ID(), frame.ID(), child.Name(), child.URL())
 
-		m.removeFramesRecursively(child.(*Frame))
+		if err := m.removeFramesRecursively(child); err != nil {
+			return fmt.Errorf("removing frames recursively: %w", err)
+		}
 	}
 
-	frame.detach()
+	if err := frame.detach(); err != nil {
+		return fmt.Errorf("removing frames recursively: detaching frame: %w", err)
+	}
 
 	m.framesMu.Lock()
 	m.logger.Debugf("FrameManager:removeFramesRecursively:delParentFrame",
@@ -427,6 +461,8 @@ func (m *FrameManager) removeFramesRecursively(frame *Frame) {
 
 		m.page.emit(EventPageFrameDetached, frame)
 	}
+
+	return nil
 }
 
 func (m *FrameManager) requestFailed(req *Request, canceled bool) {
@@ -440,25 +476,6 @@ func (m *FrameManager) requestFailed(req *Request, canceled bool) {
 		return
 	}
 	frame.deleteRequest(req.getID())
-
-	ifr := frame.cloneInflightRequests()
-	switch rc := len(ifr); {
-	case rc <= 10:
-		for reqID := range ifr {
-			req := frame.requestByID(reqID)
-
-			if req == nil {
-				m.logger.Debugf("FrameManager:requestFailed:rc<=10 request is nil",
-					"reqID:%s frameID:%s",
-					reqID, frame.ID())
-				continue
-			}
-
-			m.logger.Debugf("FrameManager:requestFailed:rc<=10",
-				"reqID:%s inflightURL:%s frameID:%s",
-				reqID, req.URL(), frame.ID())
-		}
-	}
 
 	frame.pendingDocumentMu.RLock()
 	if frame.pendingDocument == nil || frame.pendingDocument.request != req {
@@ -530,10 +547,10 @@ func (m *FrameManager) requestStarted(req *Request) {
 }
 
 // Frames returns a list of frames on the page.
-func (m *FrameManager) Frames() []api.Frame {
+func (m *FrameManager) Frames() []*Frame {
 	m.framesMu.RLock()
 	defer m.framesMu.RUnlock()
-	frames := make([]api.Frame, 0)
+	frames := make([]*Frame, 0)
 	for _, frame := range m.frames {
 		frames = append(frames, frame)
 	}
@@ -560,6 +577,14 @@ func (m *FrameManager) setMainFrame(f *Frame) {
 	m.mainFrame = f
 }
 
+// MainFrameURL returns the main frame's url.
+func (m *FrameManager) MainFrameURL() string {
+	m.mainFrameMu.RLock()
+	defer m.mainFrameMu.RUnlock()
+
+	return m.mainFrame.URL()
+}
+
 // NavigateFrame will navigate specified frame to specified URL.
 //
 //nolint:funlen,cyclop
@@ -583,7 +608,9 @@ func (m *FrameManager) NavigateFrame(frame *Frame, url string, parsedOpts *Frame
 		func(data any) bool {
 			newDocID := <-newDocIDCh
 			if evt, ok := data.(*NavigationEvent); ok {
-				return evt.newDocument.documentID == newDocID
+				if evt.newDocument != nil {
+					return evt.newDocument.documentID == newDocID
+				}
 			}
 			return false
 		})
@@ -592,10 +619,23 @@ func (m *FrameManager) NavigateFrame(frame *Frame, url string, parsedOpts *Frame
 	lifecycleEvtCh, lifecycleEvtCancel := createWaitForEventPredicateHandler(
 		timeoutCtx, frame, []string{EventFrameAddLifecycle},
 		func(data any) bool {
-			if le, ok := data.(LifecycleEvent); ok {
-				return le == parsedOpts.WaitUntil
+			le, ok := data.(FrameLifecycleEvent)
+			if !ok {
+				return false
 			}
-			return false
+			// skip the initial blank page if we are navigating to a non-blank page.
+			// otherwise, we will get a lifecycle event for the initial blank page
+			// and return prematurely before waiting for the navigation to complete.
+			if url != BlankPage && le.URL == BlankPage {
+				m.logger.Debugf(
+					"FrameManager:NavigateFrame:createWaitForEventPredicateHandler",
+					"fmid:%d fid:%v furl:%s url:%s waitUntil:%s event.lifecycle:%q event.url:%q skipping %s",
+					fmid, fid, furl, url, parsedOpts.WaitUntil, le.Event, le.URL, BlankPage,
+				)
+				return false
+			}
+
+			return le.Event == parsedOpts.WaitUntil
 		})
 	defer lifecycleEvtCancel()
 
@@ -646,7 +686,7 @@ func (m *FrameManager) NavigateFrame(frame *Frame, url string, parsedOpts *Frame
 	case evt := <-navEvtCh:
 		if e, ok := evt.(*NavigationEvent); ok {
 			req := e.newDocument.request
-			// Request could be nil in case of navigation to e.g. about:blank
+			// Request could be nil in case of navigation to e.g. BlankPage.
 			if req != nil {
 				req.responseMu.RLock()
 				resp = req.response
@@ -667,7 +707,7 @@ func (m *FrameManager) NavigateFrame(frame *Frame, url string, parsedOpts *Frame
 }
 
 // Page returns the page that this frame manager belongs to.
-func (m *FrameManager) Page() api.Page {
+func (m *FrameManager) Page() *Page {
 	if m.page != nil {
 		return m.page
 	}

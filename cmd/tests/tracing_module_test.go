@@ -23,7 +23,7 @@ func TestTracingModuleClient(t *testing.T) {
 
 	var gotRequests int64
 
-	tb.Mux.HandleFunc("/tracing", func(w http.ResponseWriter, r *http.Request) {
+	tb.Mux.HandleFunc("/tracing", func(_ http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&gotRequests, 1)
 		assert.NotEmpty(t, r.Header.Get("traceparent"))
 		assert.Len(t, r.Header.Get("traceparent"), 55)
@@ -69,7 +69,7 @@ func TestTracingClient_DoesNotInterfereWithHTTPModule(t *testing.T) {
 	var gotRequests int64
 	var gotInstrumentedRequests int64
 
-	tb.Mux.HandleFunc("/tracing", func(w http.ResponseWriter, r *http.Request) {
+	tb.Mux.HandleFunc("/tracing", func(_ http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&gotRequests, 1)
 
 		if r.Header.Get("traceparent") != "" {
@@ -108,7 +108,7 @@ func TestTracingModuleClient_HundredPercentSampling(t *testing.T) {
 	var gotRequests int64
 	var gotSampleFlags int64
 
-	tb.Mux.HandleFunc("/tracing", func(w http.ResponseWriter, r *http.Request) {
+	tb.Mux.HandleFunc("/tracing", func(_ http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&gotRequests, 1)
 
 		traceparent := r.Header.Get("traceparent")
@@ -154,6 +154,58 @@ func TestTracingModuleClient_HundredPercentSampling(t *testing.T) {
 	assertHasTraceIDMetadata(t, jsonResults, 100, tb.Replacer.Replace("HTTPBIN_IP_URL/tracing"))
 }
 
+func TestTracingModuleClient_NoSamplingSetShouldAlwaysSample(t *testing.T) {
+	t.Parallel()
+	tb := httpmultibin.NewHTTPMultiBin(t)
+
+	var gotRequests int64
+	var gotSampleFlags int64
+
+	tb.Mux.HandleFunc("/tracing", func(_ http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&gotRequests, 1)
+
+		traceparent := r.Header.Get("traceparent")
+		require.NotEmpty(t, traceparent)
+		require.Len(t, traceparent, 55)
+
+		if traceparent[54] == '1' {
+			atomic.AddInt64(&gotSampleFlags, 1)
+		}
+	})
+
+	script := tb.Replacer.Replace(`
+		import http from "k6/http";
+		import { check } from "k6";
+		import tracing from "k6/experimental/tracing";
+
+		export const options = {
+			// 100 iterations to make sure we get 100% sampling
+			iterations: 100,
+		}
+
+		// We do not set the sampling option, thus the default
+		// behavior should be to always sample.
+		const instrumentedHTTP = new tracing.Client({
+			propagator: "w3c",
+		})
+
+		export default function () {
+			instrumentedHTTP.get("HTTPBIN_IP_URL/tracing");
+		};
+	`)
+
+	ts := getSingleFileTestState(t, script, []string{"--out", "json=results.json"}, 0)
+	cmd.ExecuteWithGlobalState(ts.GlobalState)
+
+	assert.Equal(t, int64(100), atomic.LoadInt64(&gotSampleFlags))
+	assert.Equal(t, int64(100), atomic.LoadInt64(&gotRequests))
+
+	jsonResults, err := fsext.ReadFile(ts.FS, "results.json")
+	require.NoError(t, err)
+
+	assertHasTraceIDMetadata(t, jsonResults, 100, tb.Replacer.Replace("HTTPBIN_IP_URL/tracing"))
+}
+
 func TestTracingModuleClient_ZeroPercentSampling(t *testing.T) {
 	t.Parallel()
 	tb := httpmultibin.NewHTTPMultiBin(t)
@@ -161,7 +213,7 @@ func TestTracingModuleClient_ZeroPercentSampling(t *testing.T) {
 	var gotRequests int64
 	var gotSampleFlags int64
 
-	tb.Mux.HandleFunc("/tracing", func(w http.ResponseWriter, r *http.Request) {
+	tb.Mux.HandleFunc("/tracing", func(_ http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&gotRequests, 1)
 
 		traceparent := r.Header.Get("traceparent")
@@ -208,7 +260,7 @@ func TestTracingInstrumentHTTP_W3C(t *testing.T) {
 
 	var gotRequests int64
 
-	tb.Mux.HandleFunc("/tracing", func(w http.ResponseWriter, r *http.Request) {
+	tb.Mux.HandleFunc("/tracing", func(_ http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&gotRequests, 1)
 		assert.NotEmpty(t, r.Header.Get("traceparent"))
 		assert.Len(t, r.Header.Get("traceparent"), 55)
@@ -252,7 +304,7 @@ func TestTracingInstrumentHTTP_Jaeger(t *testing.T) {
 
 	var gotRequests int64
 
-	tb.Mux.HandleFunc("/tracing", func(w http.ResponseWriter, r *http.Request) {
+	tb.Mux.HandleFunc("/tracing", func(_ http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&gotRequests, 1)
 		assert.NotEmpty(t, r.Header.Get("uber-trace-id"))
 		assert.Len(t, r.Header.Get("uber-trace-id"), 45)
@@ -296,7 +348,7 @@ func TestTracingInstrumentHTTP_FillsParams(t *testing.T) {
 
 	var gotRequests int64
 
-	tb.Mux.HandleFunc("/tracing", func(w http.ResponseWriter, r *http.Request) {
+	tb.Mux.HandleFunc("/tracing", func(_ http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&gotRequests, 1)
 
 		assert.NotEmpty(t, r.Header.Get("traceparent"))
@@ -347,7 +399,7 @@ func TestTracingInstrummentHTTP_SupportsMultipleTestScripts(t *testing.T) {
 	var gotRequests int64
 
 	tb := httpmultibin.NewHTTPMultiBin(t)
-	tb.Mux.HandleFunc("/tracing", func(w http.ResponseWriter, r *http.Request) {
+	tb.Mux.HandleFunc("/tracing", func(_ http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&gotRequests, 1)
 
 		assert.NotEmpty(t, r.Header.Get("traceparent"))

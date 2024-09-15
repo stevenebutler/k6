@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"sync/atomic"
 	"testing"
 
 	"github.com/jhump/protoreflect/desc/protoparse"
@@ -14,19 +13,16 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
-	reflectpb "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
 	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
-	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
 )
 
 func TestInvoke(t *testing.T) {
 	t.Parallel()
 
-	helloReply := func(in, out *dynamicpb.Message, _ ...grpc.CallOption) error {
+	helloReply := func(_, out *dynamicpb.Message, _ ...grpc.CallOption) error {
 		err := protojson.Unmarshal([]byte(`{"reply":"text reply"}`), out)
 		require.NoError(t, err)
 
@@ -34,11 +30,13 @@ func TestInvoke(t *testing.T) {
 	}
 
 	c := Conn{raw: invokemock(helloReply)}
-	r := Request{
+	r := InvokeRequest{
+		Method:           "/hello.HelloService/SayHello",
 		MethodDescriptor: methodFromProto("SayHello"),
 		Message:          []byte(`{"greeting":"text request"}`),
+		Metadata:         metadata.New(nil),
 	}
-	res, err := c.Invoke(context.Background(), "/hello.HelloService/SayHello", metadata.New(nil), r)
+	res, err := c.Invoke(context.Background(), r)
 	require.NoError(t, err)
 
 	assert.Equal(t, codes.OK, res.Status)
@@ -49,34 +47,60 @@ func TestInvoke(t *testing.T) {
 func TestInvokeWithCallOptions(t *testing.T) {
 	t.Parallel()
 
-	reply := func(in, out *dynamicpb.Message, opts ...grpc.CallOption) error {
+	reply := func(_, _ *dynamicpb.Message, opts ...grpc.CallOption) error {
 		assert.Len(t, opts, 3) // two by default plus one injected
 		return nil
 	}
 
 	c := Conn{raw: invokemock(reply)}
-	r := Request{
+	r := InvokeRequest{
+		Method:           "/hello.HelloService/NoOp",
 		MethodDescriptor: methodFromProto("NoOp"),
 		Message:          []byte(`{}`),
+		Metadata:         metadata.New(nil),
 	}
-	res, err := c.Invoke(context.Background(), "/hello.HelloService/NoOp", metadata.New(nil), r, grpc.UseCompressor("fakeone"))
+	res, err := c.Invoke(context.Background(), r, grpc.UseCompressor("fakeone"))
 	require.NoError(t, err)
 	assert.NotNil(t, res)
+}
+
+func TestInvokeWithDiscardResponseMessage(t *testing.T) {
+	t.Parallel()
+
+	reply := func(_, _ *dynamicpb.Message, opts ...grpc.CallOption) error {
+		assert.Len(t, opts, 3) // two by default plus one injected
+		return nil
+	}
+
+	c := Conn{raw: invokemock(reply)}
+	r := InvokeRequest{
+		Method:                 "/hello.HelloService/NoOp",
+		MethodDescriptor:       methodFromProto("NoOp"),
+		DiscardResponseMessage: true,
+		Message:                []byte(`{}`),
+		Metadata:               metadata.New(nil),
+	}
+	res, err := c.Invoke(context.Background(), r, grpc.UseCompressor("fakeone"))
+	require.NoError(t, err)
+	assert.NotNil(t, res)
+	assert.Nil(t, res.Message)
 }
 
 func TestInvokeReturnError(t *testing.T) {
 	t.Parallel()
 
-	helloReply := func(in, out *dynamicpb.Message, _ ...grpc.CallOption) error {
+	helloReply := func(_, _ *dynamicpb.Message, _ ...grpc.CallOption) error {
 		return fmt.Errorf("test error")
 	}
 
 	c := Conn{raw: invokemock(helloReply)}
-	r := Request{
+	r := InvokeRequest{
+		Method:           "/hello.HelloService/SayHello",
 		MethodDescriptor: methodFromProto("SayHello"),
 		Message:          []byte(`{"greeting":"text request"}`),
+		Metadata:         metadata.New(nil),
 	}
-	res, err := c.Invoke(context.Background(), "/hello.HelloService/SayHello", metadata.New(nil), r)
+	res, err := c.Invoke(context.Background(), r)
 	require.NoError(t, err)
 
 	assert.Equal(t, codes.Unknown, res.Status)
@@ -96,49 +120,34 @@ func TestConnInvokeInvalid(t *testing.T) {
 		payload    = []byte(`{"greeting":"test"}`)
 	)
 
-	req := Request{
-		MethodDescriptor: methodDesc,
-		Message:          payload,
-	}
-
 	tests := []struct {
 		name   string
 		ctx    context.Context
-		md     metadata.MD
-		url    string
-		req    Request
+		req    InvokeRequest
 		experr string
 	}{
 		{
 			name:   "EmptyMethod",
 			ctx:    ctx,
-			url:    "",
-			md:     md,
-			req:    req,
+			req:    InvokeRequest{MethodDescriptor: methodDesc, Message: payload, Metadata: md, Method: ""},
 			experr: "url is required",
 		},
 		{
 			name:   "NullMethodDescriptor",
 			ctx:    ctx,
-			url:    url,
-			md:     nil,
-			req:    Request{Message: payload},
+			req:    InvokeRequest{Message: payload, Metadata: nil, Method: url},
 			experr: "method descriptor is required",
 		},
 		{
 			name:   "NullMessage",
 			ctx:    ctx,
-			url:    url,
-			md:     nil,
-			req:    Request{MethodDescriptor: methodDesc},
+			req:    InvokeRequest{MethodDescriptor: methodDesc, Metadata: nil, Method: url},
 			experr: "message is required",
 		},
 		{
 			name:   "EmptyMessage",
 			ctx:    ctx,
-			url:    url,
-			md:     nil,
-			req:    Request{MethodDescriptor: methodDesc, Message: []byte{}},
+			req:    InvokeRequest{MethodDescriptor: methodDesc, Message: []byte{}, Metadata: nil, Method: url},
 			experr: "message is required",
 		},
 	}
@@ -149,113 +158,12 @@ func TestConnInvokeInvalid(t *testing.T) {
 			t.Parallel()
 
 			c := Conn{}
-			res, err := c.Invoke(tt.ctx, tt.url, tt.md, tt.req)
+			res, err := c.Invoke(tt.ctx, tt.req)
 			require.Error(t, err)
 			require.Nil(t, res)
 			assert.Contains(t, err.Error(), tt.experr)
 		})
 	}
-}
-
-func TestResolveFileDescriptors(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name                string
-		pkgs                []string
-		services            []string
-		expectedDescriptors int
-	}{
-		{
-			name:                "SuccessSamePackage",
-			pkgs:                []string{"mypkg"},
-			services:            []string{"Service1", "Service2", "Service3"},
-			expectedDescriptors: 3,
-		},
-		{
-			name:                "SuccessMultiPackages",
-			pkgs:                []string{"mypkg1", "mypkg2", "mypkg3"},
-			services:            []string{"Service", "Service", "Service"},
-			expectedDescriptors: 3,
-		},
-		{
-			name:                "DeduplicateServices",
-			pkgs:                []string{"mypkg1"},
-			services:            []string{"Service1", "Service2", "Service1"},
-			expectedDescriptors: 2,
-		},
-		{
-			name:                "NoServices",
-			services:            []string{},
-			expectedDescriptors: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			var (
-				lsr  = &reflectpb.ListServiceResponse{}
-				mock = &getServiceFileDescriptorMock{}
-			)
-			for i, service := range tt.services {
-				// if only one package is defined then
-				// the package is the same for every service
-				pkg := tt.pkgs[0]
-				if len(tt.pkgs) > 1 {
-					pkg = tt.pkgs[i]
-				}
-
-				lsr.Service = append(lsr.Service, &reflectpb.ServiceResponse{
-					Name: fmt.Sprintf("%s.%s", pkg, service),
-				})
-				mock.pkgs = append(mock.pkgs, pkg)
-				mock.names = append(mock.names, service)
-			}
-
-			rc := reflectionClient{}
-			fdset, err := rc.resolveServiceFileDescriptors(mock, lsr)
-			require.NoError(t, err)
-			assert.Len(t, fdset.File, tt.expectedDescriptors)
-		})
-	}
-}
-
-type getServiceFileDescriptorMock struct {
-	pkgs  []string
-	names []string
-	nreqs int64
-}
-
-func (m *getServiceFileDescriptorMock) Send(req *reflectpb.ServerReflectionRequest) error {
-	// TODO: check that the sent message is expected,
-	// otherwise return an error
-	return nil
-}
-
-func (m *getServiceFileDescriptorMock) Recv() (*reflectpb.ServerReflectionResponse, error) {
-	n := atomic.AddInt64(&m.nreqs, 1)
-	ptr := func(s string) (sptr *string) {
-		return &s
-	}
-	index := n - 1
-	fdp := &descriptorpb.FileDescriptorProto{
-		Package: ptr(m.pkgs[index]),
-		Name:    ptr(m.names[index]),
-	}
-	b, err := proto.Marshal(fdp)
-	if err != nil {
-		return nil, err
-	}
-	srr := &reflectpb.ServerReflectionResponse{
-		MessageResponse: &reflectpb.ServerReflectionResponse_FileDescriptorResponse{
-			FileDescriptorResponse: &reflectpb.FileDescriptorResponse{
-				FileDescriptorProto: [][]byte{b},
-			},
-		},
-	}
-	return srr, nil
 }
 
 func methodFromProto(method string) protoreflect.MethodDescriptor {
@@ -267,7 +175,7 @@ func methodFromProto(method string) protoreflect.MethodDescriptor {
 			// otherwise the parser will try to parse "google/protobuf/descriptor.proto"
 			// with exactly the same name as the one we are trying to parse for testing
 			if filename != path {
-				return nil, nil
+				return nil, nil //nolint:nilnil
 			}
 
 			b := `
@@ -318,7 +226,7 @@ message Empty {
 // invokemock is a mock for the grpc connection supporting only unary requests.
 type invokemock func(in, out *dynamicpb.Message, opts ...grpc.CallOption) error
 
-func (im invokemock) Invoke(ctx context.Context, url string, payload interface{}, reply interface{}, opts ...grpc.CallOption) error {
+func (im invokemock) Invoke(_ context.Context, _ string, payload interface{}, reply interface{}, opts ...grpc.CallOption) error {
 	in, ok := payload.(*dynamicpb.Message)
 	if !ok {
 		return fmt.Errorf("unexpected type for payload")
@@ -330,12 +238,10 @@ func (im invokemock) Invoke(ctx context.Context, url string, payload interface{}
 	return im(in, out, opts...)
 }
 
-func (invokemock) NewStream(ctx context.Context, desc *grpc.StreamDesc, method string, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+func (invokemock) NewStream(_ context.Context, _ *grpc.StreamDesc, _ string, _ ...grpc.CallOption) (grpc.ClientStream, error) {
 	panic("not implemented")
 }
 
 func (invokemock) Close() error {
 	return nil
 }
-
-// TODO: add a test for the ip metric tag

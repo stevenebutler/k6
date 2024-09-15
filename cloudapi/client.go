@@ -2,11 +2,12 @@ package cloudapi
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"time"
 
@@ -19,7 +20,7 @@ const (
 	// MaxRetries specifies max retry attempts
 	MaxRetries = 3
 
-	k6IdempotencyKeyHeader = "k6-Idempotency-Key"
+	k6IdempotencyKeyHeader = "K6-Idempotency-Key"
 )
 
 // Client handles communication with the k6 Cloud API.
@@ -70,7 +71,7 @@ func (c *Client) NewRequest(method, url string, data interface{}) (*http.Request
 		buf = bytes.NewBuffer(b)
 	}
 
-	req, err := http.NewRequest(method, url, buf)
+	req, err := http.NewRequest(method, url, buf) //nolint:noctx // the user can add this
 	if err != nil {
 		return nil, err
 	}
@@ -78,6 +79,7 @@ func (c *Client) NewRequest(method, url string, data interface{}) (*http.Request
 	return req, nil
 }
 
+// Do is simpler to http.Do but also unmarshals the response in the provided v
 func (c *Client) Do(req *http.Request, v interface{}) error {
 	if req.Body != nil && req.GetBody == nil {
 		originalBody, err := io.ReadAll(req.Body)
@@ -155,7 +157,7 @@ func (c *Client) do(req *http.Request, v interface{}, attempt int) (retry bool, 
 	}
 
 	if v != nil {
-		if err = json.NewDecoder(resp.Body).Decode(v); err == io.EOF {
+		if err = json.NewDecoder(resp.Body).Decode(v); errors.Is(err, io.EOF) {
 			err = nil // Ignore EOF from empty body
 		}
 	}
@@ -181,7 +183,7 @@ func CheckResponse(r *http.Response) error {
 	}
 
 	var payload struct {
-		Error ErrorResponse `json:"error"`
+		Error ResponseError `json:"error"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
 		if r.StatusCode == http.StatusUnauthorized {
@@ -210,7 +212,7 @@ func shouldRetry(resp *http.Response, err error, attempt, maxAttempts int) bool 
 		return true
 	}
 
-	if resp.StatusCode >= 500 || resp.StatusCode == 429 {
+	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
 		return true
 	}
 
@@ -228,15 +230,9 @@ func shouldAddIdempotencyKey(req *http.Request) bool {
 
 // randomStrHex returns a hex string which can be used
 // for session token id or idempotency key.
-//
-//nolint:gosec
 func randomStrHex() string {
 	// 16 hex characters
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
-}
-
-func init() {
-	rand.Seed(time.Now().UTC().UnixNano())
 }

@@ -55,9 +55,10 @@ func TestBadConcurrentWrites(t *testing.T) {
 
 func testOutputCycle(t testing.TB, handler http.HandlerFunc, body func(testing.TB, *Output)) {
 	s := &http.Server{
-		Addr:           ":",
-		Handler:        handler,
-		MaxHeaderBytes: 1 << 20,
+		Addr:              ":",
+		Handler:           handler,
+		MaxHeaderBytes:    1 << 20,
+		ReadHeaderTimeout: time.Second,
 	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -111,7 +112,7 @@ func TestOutput(t *testing.T) {
 		}
 
 		rw.WriteHeader(http.StatusNoContent)
-	}, func(tb testing.TB, c *Output) {
+	}, func(_ testing.TB, c *Output) {
 		samples := make(metrics.Samples, 10)
 		for i := 0; i < len(samples); i++ {
 			samples[i] = metrics.Sample{
@@ -141,7 +142,7 @@ func TestOutputFlushMetricsConcurrency(t *testing.T) {
 	)
 
 	wg := sync.WaitGroup{}
-	ts := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		// block all the received requests
 		// so concurrency will be needed
 		// to not block the flush

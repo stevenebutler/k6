@@ -17,7 +17,7 @@ func TestMetricsClientPush(t *testing.T) {
 	t.Parallel()
 
 	reqs := 0
-	h := func(rw http.ResponseWriter, r *http.Request) {
+	h := func(_ http.ResponseWriter, r *http.Request) {
 		reqs++
 
 		assert.Equal(t, "/v2/metrics/test-ref-id", r.URL.Path)
@@ -36,11 +36,11 @@ func TestMetricsClientPush(t *testing.T) {
 	defer ts.Close()
 
 	c := cloudapi.NewClient(nil, "fake-token", ts.URL, "k6cloud/v0.4", 1*time.Second)
-	mc, err := newMetricsClient(c)
+	mc, err := newMetricsClient(c, "test-ref-id")
 	require.NoError(t, err)
 
 	mset := pbcloud.MetricSet{}
-	err = mc.push("test-ref-id", &mset)
+	err = mc.push(&mset)
 	require.NoError(t, err)
 	assert.Equal(t, 1, reqs)
 }
@@ -55,9 +55,9 @@ func TestMetricsClientPushUnexpectedStatus(t *testing.T) {
 	defer ts.Close()
 
 	c := cloudapi.NewClient(nil, "fake-token", ts.URL, "k6cloud/v0.4", 1*time.Second)
-	mc, err := newMetricsClient(c)
+	mc, err := newMetricsClient(c, "test-ref-id")
 	require.NoError(t, err)
 
-	err = mc.push("test-ref-id", nil)
+	err = mc.push(nil)
 	assert.ErrorContains(t, err, "500 Internal Server Error")
 }

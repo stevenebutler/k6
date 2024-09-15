@@ -48,8 +48,12 @@ func newRootCommand(gs *state.GlobalState) *rootCommand {
 		SilenceUsage:      true,
 		SilenceErrors:     true,
 		PersistentPreRunE: c.persistentPreRunE,
+		Version:           versionString(),
 	}
 
+	rootCmd.SetVersionTemplate(
+		`{{with .Name}}{{printf "%s " .}}{{end}}{{printf "v%s\n" .Version}}`,
+	)
 	rootCmd.PersistentFlags().AddFlagSet(rootCmdPersistentFlagSet(gs))
 	rootCmd.SetArgs(gs.CmdArgs[1:])
 	rootCmd.SetOut(gs.Stdout)
@@ -57,7 +61,7 @@ func newRootCommand(gs *state.GlobalState) *rootCommand {
 	rootCmd.SetIn(gs.Stdin)
 
 	subCommands := []func(*state.GlobalState) *cobra.Command{
-		getCmdArchive, getCmdCloud, getCmdConvert, getCmdInspect,
+		getCmdArchive, getCmdCloud, getCmdNewScript, getCmdInspect,
 		getCmdLogin, getCmdPause, getCmdResume, getCmdScale, getCmdRun,
 		getCmdStats, getCmdStatus, getCmdVersion,
 	}
@@ -70,7 +74,7 @@ func newRootCommand(gs *state.GlobalState) *rootCommand {
 	return c
 }
 
-func (c *rootCommand) persistentPreRunE(cmd *cobra.Command, args []string) error {
+func (c *rootCommand) persistentPreRunE(_ *cobra.Command, _ []string) error {
 	err := c.setupLoggers(c.stopLoggersCh)
 	if err != nil {
 		return err
@@ -112,18 +116,7 @@ func (c *rootCommand) execute() {
 		exitCode = int(ecerr.ExitCode())
 	}
 
-	errText := err.Error()
-	var xerr errext.Exception
-	if errors.As(err, &xerr) {
-		errText = xerr.StackTrace()
-	}
-
-	fields := logrus.Fields{}
-	var herr errext.HasHint
-	if errors.As(err, &herr) {
-		fields["hint"] = herr.Hint()
-	}
-
+	errText, fields := errext.Format(err)
 	c.globalState.Logger.WithFields(fields).Error(errText)
 	if c.loggerIsRemote {
 		c.globalState.FallbackLogger.WithFields(fields).Error(errText)
@@ -174,11 +167,6 @@ func rootCmdPersistentFlagSet(gs *state.GlobalState) *pflag.FlagSet {
 		"change the output for k6 logs, possible values are stderr,stdout,none,loki[=host:port],file[=./path.fileformat]")
 	flags.Lookup("log-output").DefValue = gs.DefaultFlags.LogOutput
 
-	flags.StringVar(&gs.Flags.LogFormat, "logformat", gs.Flags.LogFormat, "log output format")
-	oldLogFormat := flags.Lookup("logformat")
-	oldLogFormat.Hidden = true
-	oldLogFormat.Deprecated = "log-format"
-	oldLogFormat.DefValue = gs.DefaultFlags.LogFormat
 	flags.StringVar(&gs.Flags.LogFormat, "log-format", gs.Flags.LogFormat, "log output format")
 	flags.Lookup("log-format").DefValue = gs.DefaultFlags.LogFormat
 
@@ -196,6 +184,12 @@ func rootCmdPersistentFlagSet(gs *state.GlobalState) *pflag.FlagSet {
 	flags.BoolVarP(&gs.Flags.Verbose, "verbose", "v", gs.DefaultFlags.Verbose, "enable verbose logging")
 	flags.BoolVarP(&gs.Flags.Quiet, "quiet", "q", gs.DefaultFlags.Quiet, "disable progress updates")
 	flags.StringVarP(&gs.Flags.Address, "address", "a", gs.DefaultFlags.Address, "address for the REST API server")
+	flags.BoolVar(
+		&gs.Flags.ProfilingEnabled,
+		"profiling-enabled",
+		gs.DefaultFlags.ProfilingEnabled,
+		"enable profiling (pprof) endpoints, k6's REST API should be enabled as well",
+	)
 
 	return flags
 }

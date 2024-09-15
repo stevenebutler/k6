@@ -16,7 +16,7 @@ import (
 	"go.k6.io/k6/metrics"
 	"go.k6.io/k6/output"
 	cloudv2 "go.k6.io/k6/output/cloud/expv2"
-	cloudv1 "go.k6.io/k6/output/cloud/v1"
+	"go.k6.io/k6/usage"
 	"gopkg.in/guregu/null.v3"
 )
 
@@ -35,7 +35,7 @@ type versionedOutput interface {
 	StopWithTestError(testRunErr error) error
 
 	SetTestRunStopCallback(func(error))
-	SetReferenceID(id string)
+	SetTestRunID(id string)
 
 	AddMetricSamples(samples []metrics.SampleContainer)
 }
@@ -44,7 +44,7 @@ type apiVersion int64
 
 const (
 	apiVersionUndefined apiVersion = iota
-	apiVersion1
+	apiVersion1                    // disabled
 	apiVersion2
 )
 
@@ -52,16 +52,26 @@ const (
 type Output struct {
 	versionedOutput
 
-	logger      logrus.FieldLogger
-	config      cloudapi.Config
-	referenceID string
+	logger    logrus.FieldLogger
+	config    cloudapi.Config
+	testRunID string
 
 	executionPlan []lib.ExecutionStep
 	duration      int64 // in seconds
 	thresholds    map[string][]*metrics.Threshold
 
+	// testArchive is the test archive to be uploaded to the cloud
+	// before the output is Start()-ed.
+	//
+	// It is set by the SetArchive method. If it is nil, the output
+	// will not upload any test archive, such as when the user
+	// uses the --no-archive-upload flag.
+	testArchive *lib.Archive
+
 	client       *cloudapi.Client
 	testStopFunc func(error)
+
+	usage *usage.Usage
 }
 
 // Verify that Output implements the wanted interfaces
@@ -78,10 +88,19 @@ func New(params output.Params) (output.Output, error) {
 
 // New creates a new cloud output.
 func newOutput(params output.Params) (*Output, error) {
-	conf, err := cloudapi.GetConsolidatedConfig(
-		params.JSONConfig, params.Environment, params.ConfigArgument, params.ScriptOptions.External)
+	conf, warn, err := cloudapi.GetConsolidatedConfig(
+		params.JSONConfig,
+		params.Environment,
+		params.ConfigArgument,
+		params.ScriptOptions.Cloud,
+		params.ScriptOptions.External,
+	)
 	if err != nil {
 		return nil, err
+	}
+
+	if warn != "" {
+		params.Logger.Warn(warn)
 	}
 
 	if err := validateRequiredSystemTags(params.ScriptOptions.SystemTags); err != nil {
@@ -94,7 +113,7 @@ func newOutput(params output.Params) (*Output, error) {
 		scriptPath := params.ScriptPath.String()
 		if scriptPath == "" {
 			// Script from stdin without a name, likely from stdin
-			return nil, errors.New("script name not set, please specify K6_CLOUD_NAME or options.ext.loadimpact.name")
+			return nil, errors.New("script name not set, please specify K6_CLOUD_NAME or options.cloud.name")
 		}
 
 		conf.Name = null.StringFrom(filepath.Base(scriptPath))
@@ -113,9 +132,9 @@ func newOutput(params output.Params) (*Output, error) {
 			conf.MetricPushConcurrency.Int64)
 	}
 
-	if conf.MaxMetricSamplesPerPackage.Int64 < 1 {
-		return nil, fmt.Errorf("metric samples per package must be a positive number but is %d",
-			conf.MaxMetricSamplesPerPackage.Int64)
+	if conf.MaxTimeSeriesInBatch.Int64 < 1 {
+		return nil, fmt.Errorf("max allowed number of time series in a single batch must be a positive number but is %d",
+			conf.MaxTimeSeriesInBatch.Int64)
 	}
 
 	apiClient := cloudapi.NewClient(
@@ -127,6 +146,7 @@ func newOutput(params output.Params) (*Output, error) {
 		executionPlan: params.ExecutionPlan,
 		duration:      int64(duration / time.Second),
 		logger:        logger,
+		usage:         params.Usage,
 	}, nil
 }
 
@@ -157,8 +177,8 @@ func validateRequiredSystemTags(scriptTags *metrics.SystemTagSet) error {
 // goroutine that would listen for metric samples and send them to the cloud.
 func (out *Output) Start() error {
 	if out.config.PushRefID.Valid {
-		out.referenceID = out.config.PushRefID.String
-		out.logger.WithField("referenceId", out.referenceID).Debug("directly pushing metrics without init")
+		out.testRunID = out.config.PushRefID.String
+		out.logger.WithField("testRunId", out.testRunID).Debug("Directly pushing metrics without init")
 		return out.startVersionedOutput()
 	}
 
@@ -175,13 +195,14 @@ func (out *Output) Start() error {
 		VUsMax:     int64(lib.GetMaxPossibleVUs(out.executionPlan)),
 		Thresholds: thresholds,
 		Duration:   out.duration,
+		Archive:    out.testArchive,
 	}
 
 	response, err := out.client.CreateTestRun(testRun)
 	if err != nil {
 		return err
 	}
-	out.referenceID = response.ReferenceID
+	out.testRunID = response.ReferenceID
 
 	if response.ConfigOverride != nil {
 		out.logger.WithFields(logrus.Fields{
@@ -196,17 +217,17 @@ func (out *Output) Start() error {
 	}
 
 	out.logger.WithFields(logrus.Fields{
-		"name":        out.config.Name,
-		"projectId":   out.config.ProjectID,
-		"duration":    out.duration,
-		"referenceId": out.referenceID,
+		"name":      out.config.Name,
+		"projectId": out.config.ProjectID,
+		"duration":  out.duration,
+		"testRunId": out.testRunID,
 	}).Debug("Started!")
 	return nil
 }
 
 // Description returns the URL with the test run results.
 func (out *Output) Description() string {
-	return fmt.Sprintf("cloud (%s)", cloudapi.URLForResults(out.referenceID, out.config))
+	return fmt.Sprintf("cloud (%s)", cloudapi.URLForResults(out.testRunID, out.config))
 }
 
 // SetThresholds receives the thresholds before the output is Start()-ed.
@@ -222,6 +243,14 @@ func (out *Output) SetThresholds(scriptThresholds map[string]metrics.Thresholds)
 func (out *Output) SetTestRunStopCallback(stopFunc func(error)) {
 	out.testStopFunc = stopFunc
 }
+
+// SetArchive receives the test artifact to be uploaded to the cloud
+// before the output is Start()-ed.
+func (out *Output) SetArchive(archive *lib.Archive) {
+	out.testArchive = archive
+}
+
+var _ output.WithArchive = &Output{}
 
 // Stop gracefully stops all metric emission from the output: when all metric
 // samples are emitted, it makes a cloud API call to finish the test run.
@@ -252,7 +281,7 @@ func (out *Output) StopWithTestError(testErr error) error {
 }
 
 func (out *Output) testFinished(testErr error) error {
-	if out.referenceID == "" || out.config.PushRefID.Valid {
+	if out.testRunID == "" || out.config.PushRefID.Valid {
 		return nil
 	}
 
@@ -270,12 +299,12 @@ func (out *Output) testFinished(testErr error) error {
 
 	runStatus := out.getRunStatus(testErr)
 	out.logger.WithFields(logrus.Fields{
-		"ref":        out.referenceID,
+		"ref":        out.testRunID,
 		"tainted":    testTainted,
 		"run_status": runStatus,
 	}).Debug("Sending test finished")
 
-	return out.client.TestFinished(out.referenceID, thresholdResults, testTainted, runStatus)
+	return out.client.TestFinished(out.testRunID, thresholdResults, testTainted, runStatus)
 }
 
 // getRunStatus determines the run status of the test based on the error.
@@ -328,13 +357,26 @@ func (out *Output) getRunStatus(testErr error) cloudapi.RunStatus {
 }
 
 func (out *Output) startVersionedOutput() error {
-	if out.referenceID == "" {
-		return errors.New("ReferenceID is required")
+	if out.testRunID == "" {
+		return errors.New("TestRunID is required")
 	}
 	var err error
+
+	usageErr := out.usage.Strings("cloud/test_run_id", out.testRunID)
+	if usageErr != nil {
+		out.logger.Warning("Couldn't report test run id to usage as part of writing to k6 cloud")
+	}
+
+	// TODO: move here the creation of a new cloudapi.Client
+	// so in the case the config has been overwritten the client uses the correct
+	// value.
+	//
+	// This logic is handled individually by each single output, it has the downside
+	// that we could break the logic and not catch easly it.
+
 	switch out.config.APIVersion.Int64 {
 	case int64(apiVersion1):
-		out.versionedOutput, err = cloudv1.New(out.logger, out.config, out.client)
+		err = errors.New("v1 is not supported anymore")
 	case int64(apiVersion2):
 		out.versionedOutput, err = cloudv2.New(out.logger, out.config, out.client)
 	default:
@@ -345,7 +387,7 @@ func (out *Output) startVersionedOutput() error {
 		return err
 	}
 
-	out.versionedOutput.SetReferenceID(out.referenceID)
+	out.versionedOutput.SetTestRunID(out.testRunID)
 	out.versionedOutput.SetTestRunStopCallback(out.testStopFunc)
 	return out.versionedOutput.Start()
 }

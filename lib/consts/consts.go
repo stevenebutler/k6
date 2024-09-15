@@ -1,3 +1,4 @@
+// Package consts houses some constants needed across k6
 package consts
 
 import (
@@ -8,34 +9,57 @@ import (
 )
 
 // Version contains the current semantic version of k6.
-const Version = "0.45.0-shared"
-
-// VersionDetails can be set externally as part of the build process
-var VersionDetails = "" //nolint:gochecknoglobals
+const Version = "0.53.0-shared"
 
 // FullVersion returns the maximally full version and build information for
 // the currently running k6 executable.
 func FullVersion() string {
 	goVersionArch := fmt.Sprintf("%s, %s/%s", runtime.Version(), runtime.GOOS, runtime.GOARCH)
-	if VersionDetails != "" {
-		return fmt.Sprintf("%s (%s, %s)", Version, VersionDetails, goVersionArch)
+
+	buildInfo, ok := debug.ReadBuildInfo()
+	if !ok {
+		return fmt.Sprintf("%s (%s)", Version, goVersionArch)
 	}
 
-	if buildInfo, ok := debug.ReadBuildInfo(); ok {
-		return fmt.Sprintf("%s (%s, %s)", Version, buildInfo.Main.Version, goVersionArch)
+	var (
+		commit string
+		dirty  bool
+	)
+	for _, s := range buildInfo.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			commitLen := 10
+			if len(s.Value) < commitLen {
+				commitLen = len(s.Value)
+			}
+			commit = s.Value[:commitLen]
+		case "vcs.modified":
+			if s.Value == "true" {
+				dirty = true
+			}
+		default:
+		}
 	}
 
-	return fmt.Sprintf("%s (dev build, %s)", Version, goVersionArch)
+	if commit == "" {
+		return fmt.Sprintf("%s (%s)", Version, goVersionArch)
+	}
+
+	if dirty {
+		commit += "-dirty"
+	}
+
+	return fmt.Sprintf("%s (commit/%s, %s)", Version, commit, goVersionArch)
 }
 
-// Banner returns the ASCII-art banner with the k6 logo and stylized website URL
+// Banner returns the ASCII-art banner with the k6 logo
 func Banner() string {
 	banner := strings.Join([]string{
-		`          /\      |‾‾| /‾‾/   /‾‾/   `,
-		`     /\  /  \     |  |/  /   /  /    `,
-		`    /  \/    \    |     (   /   ‾‾\  `,
-		`   /          \   |  |\  \ |  (‾)  | `,
-		`  / __________ \  |__| \__\ \_____/ .io`,
+		`         /\      Grafana   /‾‾/  `,
+		`    /\  /  \     |\  __   /  /   `,
+		`   /  \/    \    | |/ /  /   ‾‾\ `,
+		`  /          \   |   (  |  (‾)  |`,
+		` / __________ \  |_|\_\  \_____/ `,
 	}, "\n")
 
 	return banner

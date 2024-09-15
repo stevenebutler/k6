@@ -13,6 +13,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"go.k6.io/k6/lib/fsext"
+	"go.k6.io/k6/lib/strvals"
 )
 
 // fileHookBufferSize is a default size for the fileHook's loglines channel.
@@ -55,25 +56,25 @@ func FileHookFromConfigLine(
 }
 
 func (h *fileHook) parseArgs(line string) error {
-	tokens, err := tokenize(line)
+	tokens, err := strvals.Parse(line)
 	if err != nil {
 		return fmt.Errorf("error while parsing logfile configuration %w", err)
 	}
 
 	for _, token := range tokens {
-		switch token.key {
+		switch token.Key {
 		case "file":
-			if token.value == "" {
+			if token.Value == "" {
 				return fmt.Errorf("filepath must not be empty")
 			}
-			h.path = token.value
+			h.path = token.Value
 		case "level":
-			h.levels, err = parseLevels(token.value)
+			h.levels, err = parseLevels(token.Value)
 			if err != nil {
 				return err
 			}
 		default:
-			return fmt.Errorf("unknown logfile config key %s", token.key)
+			return fmt.Errorf("unknown logfile config key %s", token.Key)
 		}
 	}
 
@@ -115,6 +116,21 @@ func (h *fileHook) Listen(ctx context.Context) {
 				h.fallbackLogger.Errorf("failed to write a log message to a logfile: %w", err)
 			}
 		case <-ctx.Done():
+			// This context is cancelled after the command finishes executing, so it is guaranteed that no more lines
+			// will be sent to the channel. However, as it is buffered, it may still have items on it, so we drain any
+			// pending log lines that may be there.
+		drainloop:
+			for {
+				select {
+				case entry := <-h.loglines:
+					if _, err := h.bw.Write(entry); err != nil {
+						h.fallbackLogger.Errorf("failed to write a log message to a logfile: %w", err)
+					}
+				default:
+					break drainloop
+				}
+			}
+
 			if err := h.bw.Flush(); err != nil {
 				h.fallbackLogger.Errorf("failed to flush buffer: %w", err)
 			}

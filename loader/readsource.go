@@ -16,6 +16,8 @@ import (
 func ReadSource(
 	logger logrus.FieldLogger, src, pwd string, filesystems map[string]fsext.Fs, stdin io.Reader,
 ) (*SourceData, error) {
+	// 'ToSlash' is here as URL only use '/' as separators, but on Windows paths use '\'
+	pwdURL := &url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Clean(pwd)) + "/"}
 	if src == "-" {
 		data, err := io.ReadAll(stdin)
 		if err != nil {
@@ -27,7 +29,7 @@ func ReadSource(
 		if err != nil {
 			return nil, fmt.Errorf("caching data read from -: %w", err)
 		}
-		return &SourceData{URL: &url.URL{Path: "/-", Scheme: "file"}, Data: data}, err
+		return &SourceData{URL: &url.URL{Path: "/-", Scheme: "file"}, Data: data, PWD: pwdURL}, err
 	}
 	var srcLocalPath string
 	if filepath.IsAbs(src) {
@@ -43,22 +45,14 @@ func ReadSource(
 		return Load(logger, filesystems, &url.URL{Scheme: "file", Path: filepath.ToSlash(srcLocalPath)}, src)
 	}
 
-	pwdURL := &url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Clean(pwd)) + "/"}
 	srcURL, err := Resolve(pwdURL, filepath.ToSlash(src))
 	if err != nil {
-		var noSchemeError noSchemeRemoteModuleResolutionError
-		if errors.As(err, &noSchemeError) {
-			// TODO maybe try to wrap the original error here as well, without butchering the message
-			return nil, fmt.Errorf(nothingWorkedLoadedMsg, noSchemeError.moduleSpecifier, noSchemeError.err)
+		var unresolvedError unresolvableURLError
+		if errors.As(err, &unresolvedError) {
+			//nolint:stylecheck
+			return nil, fmt.Errorf(fileSchemeCouldntBeLoadedMsg, (string)(unresolvedError))
 		}
 		return nil, err
 	}
-	result, err := Load(logger, filesystems, srcURL, src)
-	var noSchemeError noSchemeRemoteModuleResolutionError
-	if errors.As(err, &noSchemeError) {
-		// TODO maybe try to wrap the original error here as well, without butchering the message
-		return nil, fmt.Errorf(nothingWorkedLoadedMsg, noSchemeError.moduleSpecifier, noSchemeError.err)
-	}
-
-	return result, err
+	return Load(logger, filesystems, srcURL, src)
 }

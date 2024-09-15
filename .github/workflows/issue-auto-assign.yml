@@ -1,7 +1,11 @@
-name: 'Auto assign maintainer to issue'
+name: "Auto assign maintainer to issue"
 on:
+  # makes this workflow re-usable
+  workflow_call:
   issues:
     types: [opened]
+  issue_comment:
+    types: [created]
 
 permissions:
   issues: write
@@ -9,21 +13,41 @@ permissions:
 jobs:
   assign-user:
     runs-on: ubuntu-latest
+    # issue_comment triggers for both, issues and prs,
+    # as we need to run only on issues, it filter out prs.
+    if: ${{ !github.event.issue.pull_request }}
     steps:
-      - uses: actions/github-script@v6
+      - uses: actions/github-script@v7
         with:
           script: |
-            const assignees = ['mstoykov', 'imiric', 'codebien', 'olegbespalov', 'oleiade'];
+            const assignees = ['mstoykov', 'olegbespalov', 'oleiade', 'joanlopez'];
             const assigneeCount = 1;
 
             // Do not automatically assign users if someone was already assigned or it was opened by a maintainer
-            if (context.payload.issue.assignees.length > 0 || assignees.includes(context.payload.issue.user.login)) {
+            if (context.payload.issue.assignees.length > 0 || assignees.includes(context.actor)) {
               return;
+            }
+            const crypto = require("node:crypto");
+
+            const getNRandom = (n, array) => {
+              let result = new Array();
+              for (;n > 0 && array.length > 0; n--) {
+                const chosen = array[crypto.randomInt(array.length)];
+                result.push(chosen);
+                array = array.filter(el => el != chosen);
+              }
+              return result;
             }
 
             github.rest.issues.addAssignees({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              assignees: assignees.sort(() => 0.5 - Math.random()).slice(0, assigneeCount),
+              assignees: getNRandom(assigneeCount, assignees),
+            });
+            github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ["triage"]
             });

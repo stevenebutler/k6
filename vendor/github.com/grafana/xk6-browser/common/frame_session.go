@@ -10,7 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/grafana/xk6-browser/api"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/grafana/xk6-browser/k6ext"
 	"github.com/grafana/xk6-browser/log"
 
@@ -33,6 +35,12 @@ import (
 
 const utilityWorldName = "__k6_browser_utility_world__"
 
+// CPUProfile is used in throttleCPU.
+type CPUProfile struct {
+	// rate as a slowdown factor (1 is no throttle, 2 is 2x slowdown, etc).
+	Rate float64
+}
+
 /*
 FrameSession is used for managing a frame's life-cycle, or in other words its full session.
 It manages all the event listening while deferring the state storage to the Frame and FrameManager
@@ -49,7 +57,9 @@ type FrameSession struct {
 	k6Metrics *k6ext.CustomMetrics
 
 	targetID target.ID
-	windowID browser.WindowID
+	// windowID can be 0 when it is associated to an iframe or frame with no UI.
+	windowID    browser.WindowID
+	hasUIWindow bool
 
 	// To understand the concepts of Isolated Worlds, Contexts and Frames and
 	// the relationship betwween them have a look at the following doc:
@@ -64,17 +74,26 @@ type FrameSession struct {
 	vu            k6modules.VU
 
 	logger *log.Logger
-	// logger that will properly serialize RemoteObject instances
-	serializer *log.Logger
+
+	// Keep a reference to the main frame span so we can end it
+	// when FrameSession.ctx is Done
+	mainFrameSpan trace.Span
+	// The initial navigation when a new page is created navigates to about:blank.
+	// We want to make sure that the the navigation span is created for this in
+	// onFrameNavigated, but subsequent calls to onFrameNavigated in the same
+	// mainframe never again create a navigation span.
+	initialNavDone bool
 }
 
 // NewFrameSession initializes and returns a new FrameSession.
 //
 //nolint:funlen
 func NewFrameSession(
-	ctx context.Context, s session, p *Page, parent *FrameSession, tid target.ID, l *log.Logger,
+	ctx context.Context, s session, p *Page, parent *FrameSession, tid target.ID, l *log.Logger, hasUIWindow bool,
 ) (_ *FrameSession, err error) {
 	l.Debugf("NewFrameSession", "sid:%v tid:%v", s.ID(), tid)
+
+	k6Metrics := k6ext.GetCustomMetrics(ctx)
 
 	fs := FrameSession{
 		ctx:                  ctx, // TODO: create cancelable context that can be used to cancel and close all child sessions
@@ -89,30 +108,40 @@ func NewFrameSession(
 		eventCh:              make(chan Event),
 		childSessions:        make(map[cdp.FrameID]*FrameSession),
 		vu:                   k6ext.GetVU(ctx),
-		k6Metrics:            k6ext.GetCustomMetrics(ctx),
+		k6Metrics:            k6Metrics,
 		logger:               l,
-		serializer:           l.ConsoleLogFormatterSerializer(),
+		hasUIWindow:          hasUIWindow,
+	}
+
+	if err := cdpruntime.RunIfWaitingForDebugger().Do(cdp.WithExecutor(fs.ctx, fs.session)); err != nil {
+		return nil, fmt.Errorf("run if waiting for debugger to attach: %w", err)
 	}
 
 	var parentNM *NetworkManager
 	if fs.parent != nil {
 		parentNM = fs.parent.networkManager
 	}
-	fs.networkManager, err = NewNetworkManager(ctx, s, fs.manager, parentNM)
+	fs.networkManager, err = NewNetworkManager(ctx, k6Metrics, s, fs.manager, parentNM)
 	if err != nil {
 		l.Debugf("NewFrameSession:NewNetworkManager", "sid:%v tid:%v err:%v",
 			s.ID(), tid, err)
 		return nil, err
 	}
 
-	action := browser.GetWindowForTarget().WithTargetID(fs.targetID)
-	if fs.windowID, _, err = action.Do(cdp.WithExecutor(fs.ctx, fs.session)); err != nil {
-		l.Debugf(
-			"NewFrameSession:GetWindowForTarget",
-			"sid:%v tid:%v err:%v",
-			s.ID(), tid, err)
+	// When a frame creates a new FrameSession without UI (e.g. some iframes) we cannot
+	// retrieve the windowID. Doing so would lead to an error from chromium. For now all
+	// iframes that are attached are setup with hasUIWindow as false which seems to work
+	// as expected for iframes with and without UI elements.
+	if fs.hasUIWindow {
+		action := browser.GetWindowForTarget().WithTargetID(fs.targetID)
+		if fs.windowID, _, err = action.Do(cdp.WithExecutor(fs.ctx, fs.session)); err != nil {
+			l.Debugf(
+				"NewFrameSession:GetWindowForTarget",
+				"sid:%v tid:%v err:%v",
+				s.ID(), tid, err)
 
-		return nil, fmt.Errorf("getting browser window ID: %w", err)
+			return nil, fmt.Errorf("getting browser window ID: %w", err)
+		}
 	}
 
 	fs.initEvents()
@@ -209,8 +238,21 @@ func (fs *FrameSession) initEvents() {
 	go func() {
 		fs.logger.Debugf("NewFrameSession:initEvents:go",
 			"sid:%v tid:%v", fs.session.ID(), fs.targetID)
-		defer fs.logger.Debugf("NewFrameSession:initEvents:go:return",
-			"sid:%v tid:%v", fs.session.ID(), fs.targetID)
+		defer func() {
+			// If there is an active span for main frame,
+			// end it before exiting so it can be flushed
+			if fs.mainFrameSpan != nil {
+				// The url needs to be added here instead of at the start of the span
+				// because at the start of the span we don't know the correct url for
+				// the page we're navigating to. At the end of the span we do have this
+				// information.
+				fs.mainFrameSpan.SetAttributes(attribute.String("navigation.url", fs.manager.MainFrameURL()))
+				fs.mainFrameSpan.End()
+				fs.mainFrameSpan = nil
+			}
+			fs.logger.Debugf("NewFrameSession:initEvents:go:return",
+				"sid:%v tid:%v", fs.session.ID(), fs.targetID)
+		}()
 
 		for {
 			select {
@@ -293,6 +335,7 @@ func (fs *FrameSession) parseAndEmitWebVitalMetric(object string) error {
 		NumEntries     json.Number
 		NavigationType string
 		URL            string
+		SpanID         string
 	}{}
 
 	if err := json.Unmarshal([]byte(object), &wv); err != nil {
@@ -302,11 +345,6 @@ func (fs *FrameSession) parseAndEmitWebVitalMetric(object string) error {
 	metric, ok := fs.k6Metrics.WebVitals[wv.Name]
 	if !ok {
 		return fmt.Errorf("metric not registered %q", wv.Name)
-	}
-
-	metricRating, ok := fs.k6Metrics.WebVitals[k6ext.ConcatWebVitalNameRating(wv.Name, wv.Rating)]
-	if !ok {
-		return fmt.Errorf("metric not registered %q", k6ext.ConcatWebVitalNameRating(wv.Name, wv.Rating))
 	}
 
 	value, err := wv.Value.Float64()
@@ -320,21 +358,26 @@ func (fs *FrameSession) parseAndEmitWebVitalMetric(object string) error {
 		tags = tags.With("url", wv.URL)
 	}
 
+	tags = tags.With("rating", wv.Rating)
+
 	now := time.Now()
-	k6metrics.PushIfNotDone(fs.ctx, state.Samples, k6metrics.ConnectedSamples{
+	k6metrics.PushIfNotDone(fs.vu.Context(), state.Samples, k6metrics.ConnectedSamples{
 		Samples: []k6metrics.Sample{
 			{
 				TimeSeries: k6metrics.TimeSeries{Metric: metric, Tags: tags},
 				Value:      value,
 				Time:       now,
 			},
-			{
-				TimeSeries: k6metrics.TimeSeries{Metric: metricRating, Tags: tags},
-				Value:      1,
-				Time:       now,
-			},
 		},
 	})
+
+	_, span := TraceEvent(
+		fs.ctx, fs.targetID.String(), "web_vital", wv.SpanID, trace.WithAttributes(
+			attribute.String("web_vital.name", wv.Name),
+			attribute.Float64("web_vital.value", value),
+			attribute.String("web_vital.rating", wv.Rating),
+		))
+	defer span.End()
 
 	return nil
 }
@@ -382,8 +425,10 @@ func (fs *FrameSession) initFrameTree() error {
 		return fmt.Errorf("got a nil page frame tree")
 	}
 
+	// Any new frame may have a child frame, not just mainframes.
+	fs.handleFrameTree(frameTree, fs.isMainFrame())
+
 	if fs.isMainFrame() {
-		fs.handleFrameTree(frameTree)
 		fs.initRendererEvents()
 	}
 	return nil
@@ -407,11 +452,14 @@ func (fs *FrameSession) initIsolatedWorld(name string) error {
 	}
 	fs.isolatedWorlds[name] = true
 
-	var frames []api.Frame
+	var frames []*Frame
 	if fs.isMainFrame() {
 		frames = fs.manager.Frames()
 	} else {
-		frames = []api.Frame{fs.manager.getFrameByID(cdp.FrameID(fs.targetID))}
+		frame, ok := fs.manager.getFrameByID(cdp.FrameID(fs.targetID))
+		if ok {
+			frames = []*Frame{frame}
+		}
 	}
 	for _, frame := range frames {
 		// A frame could have been removed before we execute this, so don't wait around for a reply.
@@ -484,7 +532,9 @@ func (fs *FrameSession) initOptions() error {
 	if err := fs.updateGeolocation(true); err != nil {
 		return err
 	}
-	fs.updateExtraHTTPHeaders(true)
+	if err := fs.updateExtraHTTPHeaders(true); err != nil {
+		return err
+	}
 
 	var reqIntercept bool
 	if state.Options.BlockedHostnames.Trie != nil ||
@@ -495,8 +545,12 @@ func (fs *FrameSession) initOptions() error {
 		return err
 	}
 
-	fs.updateOffline(true)
-	fs.updateHTTPCredentials(true)
+	if err := fs.updateOffline(true); err != nil {
+		return err
+	}
+	if err := fs.updateHTTPCredentials(true); err != nil {
+		return err
+	}
 	if err := fs.updateEmulateMedia(true); err != nil {
 		return err
 	}
@@ -508,8 +562,6 @@ func (fs *FrameSession) initOptions() error {
 	      promises.push(this._evaluateOnNewDocument(source, 'main'));
 	  for (const source of this._crPage._page._evaluateOnNewDocumentSources)
 	      promises.push(this._evaluateOnNewDocument(source, 'main'));*/
-
-	optActions = append(optActions, cdpruntime.RunIfWaitingForDebugger())
 
 	for _, action := range optActions {
 		if err := action.Do(cdp.WithExecutor(fs.ctx, fs.session)); err != nil {
@@ -552,19 +604,19 @@ func (fs *FrameSession) isMainFrame() bool {
 	return fs.targetID == fs.page.targetID
 }
 
-func (fs *FrameSession) handleFrameTree(frameTree *cdppage.FrameTree) {
+func (fs *FrameSession) handleFrameTree(frameTree *cdppage.FrameTree, initialFrame bool) {
 	fs.logger.Debugf("FrameSession:handleFrameTree",
-		"sid:%v tid:%v", fs.session.ID(), fs.targetID)
+		"fid:%v sid:%v tid:%v", frameTree.Frame.ID, fs.session.ID(), fs.targetID)
 
 	if frameTree.Frame.ParentID != "" {
 		fs.onFrameAttached(frameTree.Frame.ID, frameTree.Frame.ParentID)
 	}
-	fs.onFrameNavigated(frameTree.Frame, true)
+	fs.onFrameNavigated(frameTree.Frame, initialFrame)
 	if frameTree.ChildFrames == nil {
 		return
 	}
 	for _, child := range frameTree.ChildFrames {
-		fs.handleFrameTree(child)
+		fs.handleFrameTree(child, initialFrame)
 	}
 }
 
@@ -586,9 +638,10 @@ func (fs *FrameSession) navigateFrame(frame *Frame, url, referrer string) (strin
 }
 
 func (fs *FrameSession) onConsoleAPICalled(event *cdpruntime.EventConsoleAPICalled) {
-	l := fs.serializer.
+	l := fs.logger.
 		WithTime(event.Timestamp.Time()).
-		WithField("source", "browser-console-api")
+		WithField("source", "browser").
+		WithField("browser_source", "console-api")
 
 		/* accessing the state Group while not on the eventloop is racy
 		if s := fs.vu.State(); s.Group.Path != "" {
@@ -596,26 +649,28 @@ func (fs *FrameSession) onConsoleAPICalled(event *cdpruntime.EventConsoleAPICall
 		}
 		*/
 
-	parsedObjects := make([]any, 0, len(event.Args))
+	parsedObjects := make([]string, 0, len(event.Args))
 	for _, robj := range event.Args {
-		i, err := parseRemoteObject(robj)
+		s, err := parseConsoleRemoteObject(fs.logger, robj)
 		if err != nil {
-			handleParseRemoteObjectErr(fs.ctx, err, l)
+			fs.logger.Errorf("onConsoleAPICalled", "failed to parse console message %v", err)
 		}
-		parsedObjects = append(parsedObjects, i)
+		parsedObjects = append(parsedObjects, s)
 	}
 
-	l = l.WithField("objects", parsedObjects)
+	msg := strings.Join(parsedObjects, " ")
 
 	switch event.Type {
 	case "log", "info":
-		l.Info()
+		l.Info(msg)
 	case "warning":
-		l.Warn()
+		l.Warn(msg)
 	case "error":
-		l.Error()
+		l.Error(msg)
 	default:
-		l.Debug()
+		// this is where debug & other console.* apis will default to (such as
+		// console.table).
+		l.Debug(msg)
 	}
 }
 
@@ -637,18 +692,25 @@ func (fs *FrameSession) onExecutionContextCreated(event *cdpruntime.EventExecuti
 	if err := json.Unmarshal(auxData, &i); err != nil {
 		k6ext.Panic(fs.ctx, "unmarshaling executionContextCreated event JSON: %w", err)
 	}
-	var world executionWorld
-	frame := fs.manager.getFrameByID(i.FrameID)
-	if frame != nil {
-		if i.IsDefault {
-			world = mainWorld
-		} else if event.Context.Name == utilityWorldName && !frame.hasContext(utilityWorld) {
-			// In case of multiple sessions to the same target, there's a race between
-			// connections so we might end up creating multiple isolated worlds.
-			// We can use either.
-			world = utilityWorld
-		}
+
+	frame, ok := fs.manager.getFrameByID(i.FrameID)
+	if !ok {
+		fs.logger.Debugf("FrameSession:onExecutionContextCreated:return",
+			"sid:%v tid:%v ectxid:%d missing frame",
+			fs.session.ID(), fs.targetID, event.Context.ID)
+		return
 	}
+
+	var world executionWorld
+	if i.IsDefault {
+		world = mainWorld
+	} else if event.Context.Name == utilityWorldName && !frame.hasContext(utilityWorld) {
+		// In case of multiple sessions to the same target, there's a race between
+		// connections so we might end up creating multiple isolated worlds.
+		// We can use either.
+		world = utilityWorld
+	}
+
 	if i.Type == "isolated" {
 		fs.isolatedWorlds[event.Context.Name] = true
 	}
@@ -712,7 +774,9 @@ func (fs *FrameSession) onFrameDetached(frameID cdp.FrameID, reason cdppage.Fram
 		"sid:%v tid:%v fid:%v reason:%s",
 		fs.session.ID(), fs.targetID, frameID, reason)
 
-	fs.manager.frameDetached(frameID, reason)
+	if err := fs.manager.frameDetached(frameID, reason); err != nil {
+		k6ext.Panic(fs.ctx, "handling frameDetached event: %w", err)
+	}
 }
 
 func (fs *FrameSession) onFrameNavigated(frame *cdp.Frame, initial bool) {
@@ -727,6 +791,68 @@ func (fs *FrameSession) onFrameNavigated(frame *cdp.Frame, initial bool) {
 		k6ext.Panic(fs.ctx, "handling frameNavigated event to %q: %w",
 			frame.URL+frame.URLFragment, err)
 	}
+
+	// Only create a navigation span once from here, since a new page navigating
+	// to about:blank doesn't call onFrameStartedLoading. All subsequent
+	// navigations call onFrameStartedLoading.
+	if fs.initialNavDone {
+		return
+	}
+
+	fs.initialNavDone = true
+	fs.processNavigationSpan(frame.ID)
+}
+
+func (fs *FrameSession) processNavigationSpan(id cdp.FrameID) {
+	newFrame, ok := fs.manager.getFrameByID(id)
+	if !ok {
+		return
+	}
+
+	// Trace navigation only for the main frame.
+	// TODO: How will this affect sub frames such as iframes?
+	if newFrame.page.frameManager.MainFrame() != newFrame {
+		return
+	}
+
+	// End the navigation span if it is non-nil
+	if fs.mainFrameSpan != nil {
+		// The url needs to be added here instead of at the start of the span
+		// because at the start of the span we don't know the correct url for
+		// the page we're navigating to. At the end of the span we do have this
+		// information.
+		fs.mainFrameSpan.SetAttributes(attribute.String("navigation.url", fs.manager.MainFrameURL()))
+		fs.mainFrameSpan.End()
+	}
+
+	_, fs.mainFrameSpan = TraceNavigation(
+		fs.ctx, fs.targetID.String(),
+	)
+
+	spanID := fs.mainFrameSpan.SpanContext().SpanID().String()
+
+	// Set k6SpanId property in the page so it can be retrieved when pushing
+	// the Web Vitals events from the page execution context and used to
+	// correlate them with the navigation span to which they belong to.
+	setSpanIDProp := func() {
+		js := fmt.Sprintf("window.k6SpanId = '%s';", spanID)
+		err := newFrame.EvaluateGlobal(fs.ctx, js)
+		if err != nil {
+			fs.logger.Errorf(
+				"FrameSession:onFrameNavigated", "error on evaluating window.k6SpanId: %v", err,
+			)
+		}
+	}
+
+	// Executing a CDP command in the event parsing goroutine might deadlock in some cases.
+	// For example a deadlock happens if the content loaded in the frame that has navigated
+	// includes a JavaScript initiated dialog which we have to explicitly accept or dismiss
+	// (see onEventJavascriptDialogOpening). In that case our EvaluateGlobal call can't be
+	// executed, as the browser is waiting for us to accept/dismiss the JS dialog, but we
+	// can't act on that because the event parsing goroutine is stuck in onFrameNavigated.
+	// Because in this case the action is to set an attribute to the global object (window)
+	// it should be safe to just execute this in a separate goroutine.
+	go setSpanIDProp()
 }
 
 func (fs *FrameSession) onFrameRequestedNavigation(event *cdppage.EventFrameRequestedNavigation) {
@@ -746,6 +872,8 @@ func (fs *FrameSession) onFrameStartedLoading(frameID cdp.FrameID) {
 	fs.logger.Debugf("FrameSession:onFrameStartedLoading",
 		"sid:%v tid:%v fid:%v",
 		fs.session.ID(), fs.targetID, frameID)
+
+	fs.processNavigationSpan(frameID)
 
 	fs.manager.frameLoadingStarted(frameID)
 }
@@ -787,8 +915,8 @@ func (fs *FrameSession) onPageLifecycle(event *cdppage.EventLifecycleEvent) {
 		"sid:%v tid:%v fid:%v event:%s eventTime:%q",
 		fs.session.ID(), fs.targetID, event.FrameID, event.Name, event.Timestamp.Time())
 
-	frame := fs.manager.getFrameByID(event.FrameID)
-	if frame == nil {
+	_, ok := fs.manager.getFrameByID(event.FrameID)
+	if !ok {
 		return
 	}
 
@@ -889,8 +1017,8 @@ func (fs *FrameSession) onAttachedToTarget(event *target.EventAttachedToTarget) 
 
 // attachIFrameToTarget attaches an IFrame target to a given session.
 func (fs *FrameSession) attachIFrameToTarget(ti *target.Info, sid target.SessionID) error {
-	fr := fs.manager.getFrameByID(cdp.FrameID(ti.TargetID))
-	if fr == nil {
+	fr, ok := fs.manager.getFrameByID(cdp.FrameID(ti.TargetID))
+	if !ok {
 		// IFrame should be attached to fs.page with EventFrameAttached
 		// event before.
 		fs.logger.Debugf("FrameSession:attachIFrameToTarget:return",
@@ -906,7 +1034,8 @@ func (fs *FrameSession) attachIFrameToTarget(ti *target.Info, sid target.Session
 		fs.ctx,
 		fs.page.browserCtx.getSession(sid),
 		fs.page, fs, ti.TargetID,
-		fs.logger)
+		fs.logger,
+		false)
 	if err != nil {
 		return fmt.Errorf("attaching iframe target ID %v to session ID %v: %w",
 			ti.TargetID, sid, err)
@@ -978,7 +1107,7 @@ func (fs *FrameSession) updateEmulateMedia(initial bool) error {
 	return nil
 }
 
-func (fs *FrameSession) updateExtraHTTPHeaders(initial bool) {
+func (fs *FrameSession) updateExtraHTTPHeaders(initial bool) error {
 	fs.logger.Debugf("NewFrameSession:updateExtraHTTPHeaders", "sid:%v tid:%v", fs.session.ID(), fs.targetID)
 
 	// Merge extra headers from browser context and page, where page specific headers ake precedence.
@@ -990,8 +1119,12 @@ func (fs *FrameSession) updateExtraHTTPHeaders(initial bool) {
 		mergedHeaders[k] = v
 	}
 	if !initial || len(mergedHeaders) > 0 {
-		fs.networkManager.SetExtraHTTPHeaders(mergedHeaders)
+		if err := fs.networkManager.SetExtraHTTPHeaders(mergedHeaders); err != nil {
+			return fmt.Errorf("updating extra HTTP headers: %w", err)
+		}
 	}
+
+	return nil
 }
 
 func (fs *FrameSession) updateGeolocation(initial bool) error {
@@ -1007,25 +1140,47 @@ func (fs *FrameSession) updateGeolocation(initial bool) error {
 			return fmt.Errorf("%w", err)
 		}
 	}
+
 	return nil
 }
 
-func (fs *FrameSession) updateHTTPCredentials(initial bool) {
+func (fs *FrameSession) updateHTTPCredentials(initial bool) error {
 	fs.logger.Debugf("NewFrameSession:updateHttpCredentials", "sid:%v tid:%v", fs.session.ID(), fs.targetID)
 
 	credentials := fs.page.browserCtx.opts.HttpCredentials
 	if !initial || credentials != nil {
-		fs.networkManager.Authenticate(credentials)
+		return fs.networkManager.Authenticate(credentials)
 	}
+
+	return nil
 }
 
-func (fs *FrameSession) updateOffline(initial bool) {
+func (fs *FrameSession) updateOffline(initial bool) error {
 	fs.logger.Debugf("NewFrameSession:updateOffline", "sid:%v tid:%v", fs.session.ID(), fs.targetID)
 
 	offline := fs.page.browserCtx.opts.Offline
 	if !initial || offline {
-		fs.networkManager.SetOfflineMode(offline)
+		if err := fs.networkManager.SetOfflineMode(offline); err != nil {
+			return fmt.Errorf("updating offline mode for frame %v: %w", fs.targetID, err)
+		}
 	}
+
+	return nil
+}
+
+func (fs *FrameSession) throttleNetwork(networkProfile NetworkProfile) error {
+	fs.logger.Debugf("NewFrameSession:throttleNetwork", "sid:%v tid:%v", fs.session.ID(), fs.targetID)
+
+	return fs.networkManager.ThrottleNetwork(networkProfile)
+}
+
+func (fs *FrameSession) throttleCPU(cpuProfile CPUProfile) error {
+	action := emulation.SetCPUThrottlingRate(cpuProfile.Rate)
+	if err := action.Do(cdp.WithExecutor(fs.ctx, fs.session)); err != nil {
+		return fmt.Errorf("throttling CPU: %w", err)
+	}
+
+	return nil
 }
 
 func (fs *FrameSession) updateRequestInterception(enable bool) error {
@@ -1073,19 +1228,34 @@ func (fs *FrameSession) updateViewport() error {
 		return fmt.Errorf("emulating viewport: %w", err)
 	}
 
-	// add an inset to viewport depending on the operating system.
-	// this won't add an inset if we're running in headless mode.
-	viewport.calculateInset(
-		fs.page.browserCtx.browser.launchOpts.Headless,
-		runtime.GOOS,
-	)
-	action2 := browser.SetWindowBounds(fs.windowID, &browser.Bounds{
-		Width:  viewport.Width,
-		Height: viewport.Height,
-	})
-	if err := action2.Do(cdp.WithExecutor(fs.ctx, fs.session)); err != nil {
-		return fmt.Errorf("setting window bounds: %w", err)
+	if fs.hasUIWindow {
+		// add an inset to viewport depending on the operating system.
+		// this won't add an inset if we're running in headless mode.
+		viewport.calculateInset(
+			fs.page.browserCtx.browser.browserOpts.Headless,
+			runtime.GOOS,
+		)
+		action2 := browser.SetWindowBounds(fs.windowID, &browser.Bounds{
+			Width:  viewport.Width,
+			Height: viewport.Height,
+		})
+		if err := action2.Do(cdp.WithExecutor(fs.ctx, fs.session)); err != nil {
+			return fmt.Errorf("setting window bounds: %w", err)
+		}
 	}
 
 	return nil
+}
+
+func (fs *FrameSession) executionContextForID(
+	executionContextID cdpruntime.ExecutionContextID,
+) (*ExecutionContext, error) {
+	fs.contextIDToContextMu.Lock()
+	defer fs.contextIDToContextMu.Unlock()
+
+	if exc, ok := fs.contextIDToContext[executionContextID]; ok {
+		return exc, nil
+	}
+
+	return nil, fmt.Errorf("no execution context found for id: %v", executionContextID)
 }

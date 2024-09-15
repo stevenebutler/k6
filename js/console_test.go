@@ -4,12 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/url"
 	"os"
 	"testing"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
@@ -22,11 +21,12 @@ import (
 	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/loader"
 	"go.k6.io/k6/metrics"
+	"go.k6.io/k6/usage"
 )
 
 func TestConsoleContext(t *testing.T) {
 	t.Parallel()
-	rt := goja.New()
+	rt := sobek.New()
 	rt.SetFieldNameMapper(common.FieldNameMapper{})
 
 	logger, hook := logtest.NewNullLogger()
@@ -73,7 +73,8 @@ func getSimpleRunner(tb testing.TB, filename, data string, opts ...interface{}) 
 			RuntimeOptions: rtOpts,
 			BuiltinMetrics: builtinMetrics,
 			Registry:       registry,
-			LookupEnv:      func(key string) (val string, ok bool) { return "", false },
+			LookupEnv:      func(_ string) (val string, ok bool) { return "", false },
+			Usage:          usage.New(),
 		},
 		&loader.SourceData{
 			URL:  &url.URL{Path: filename, Scheme: "file"},
@@ -83,8 +84,47 @@ func getSimpleRunner(tb testing.TB, filename, data string, opts ...interface{}) 
 	)
 }
 
+func getSimpleArchiveRunner(tb testing.TB, arc *lib.Archive, opts ...interface{}) (*Runner, error) {
+	var (
+		rtOpts      = lib.RuntimeOptions{CompatibilityMode: null.NewString("base", true)}
+		logger      = testutils.NewLogger(tb)
+		fsResolvers = map[string]fsext.Fs{"file": fsext.NewMemMapFs(), "https": fsext.NewMemMapFs()}
+	)
+	for _, o := range opts {
+		switch opt := o.(type) {
+		case fsext.Fs:
+			fsResolvers["file"] = opt
+		case map[string]fsext.Fs:
+			fsResolvers = opt
+		case lib.RuntimeOptions:
+			rtOpts = opt
+		case logrus.FieldLogger:
+			logger = opt
+		default:
+			tb.Fatalf("unknown test option %q", opt)
+		}
+	}
+	registry := metrics.NewRegistry()
+	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
+	return NewFromArchive(
+		&lib.TestPreInitState{
+			Logger:         logger,
+			RuntimeOptions: rtOpts,
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+			Usage:          usage.New(),
+		}, arc)
+}
+
 // TODO: remove the need for this function, see https://github.com/grafana/k6/issues/2968
-func extractLogger(fl logrus.FieldLogger) *logrus.Logger {
+//
+//nolint:forbidigo
+func extractLogger(vu lib.ActiveVU) *logrus.Logger {
+	vuSpecific, ok := vu.(*ActiveVU)
+	if !ok {
+		panic("lib.ActiveVU can't be caset to *ActiveVU")
+	}
+	fl := vuSpecific.Console.logger
 	switch e := fl.(type) {
 	case *logrus.Entry:
 		return e.Logger
@@ -95,10 +135,10 @@ func extractLogger(fl logrus.FieldLogger) *logrus.Logger {
 	}
 }
 
-func TestConsoleLogWithGojaNativeObject(t *testing.T) {
+func TestConsoleLogWithSobekNativeObject(t *testing.T) {
 	t.Parallel()
 
-	rt := goja.New()
+	rt := sobek.New()
 	rt.SetFieldNameMapper(common.FieldNameMapper{})
 
 	obj := rt.NewObject()
@@ -157,7 +197,7 @@ func TestConsoleLogObjectsWithGoTypes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			rt := goja.New()
+			rt := sobek.New()
 			rt.SetFieldNameMapper(common.FieldNameMapper{})
 			obj := rt.ToValue(tt.in)
 
@@ -218,7 +258,7 @@ func TestConsoleLog(t *testing.T) {
 
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 
-			logger := extractLogger(vu.(*ActiveVU).Console.logger)
+			logger := extractLogger(vu)
 
 			logger.Out = io.Discard
 			logger.Level = logrus.DebugLevel
@@ -276,7 +316,7 @@ func TestConsoleLevels(t *testing.T) {
 
 					vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 
-					logger := extractLogger(vu.(*ActiveVU).Console.logger)
+					logger := extractLogger(vu)
 
 					logger.Out = io.Discard
 					logger.Level = logrus.DebugLevel
@@ -335,26 +375,19 @@ func TestFileConsole(t *testing.T) {
 						msg, deleteFile := msg, deleteFile
 						t.Run(msg, func(t *testing.T) {
 							t.Parallel()
-							f, err := ioutil.TempFile("", "")
-							if err != nil {
-								t.Fatalf("Couldn't create temporary file for testing: %s", err)
-							}
+							f, err := os.CreateTemp("", "") //nolint:forbidigo // fix with https://github.com/grafana/k6/issues/2565
+							require.NoError(t, err)
 							logFilename := f.Name()
-							defer os.Remove(logFilename)
+							defer os.Remove(logFilename) //nolint:errcheck,forbidigo // fix with https://github.com/grafana/k6/issues/2565
 							// close it as we will want to reopen it and maybe remove it
 							if deleteFile {
-								f.Close()
-								if err := os.Remove(logFilename); err != nil {
-									t.Fatalf("Couldn't remove tempfile: %s", err)
-								}
+								require.NoError(t, f.Close())
+								require.NoError(t, os.Remove(logFilename)) //nolint:forbidigo // fix with https://github.com/grafana/k6/issues/2565
 							} else {
 								// TODO: handle case where the string was no written in full ?
 								_, err = f.WriteString(preExistingText)
-								_ = f.Close()
-								if err != nil {
-									t.Fatalf("Error while writing text to preexisting logfile: %s", err)
-								}
-
+								assert.NoError(t, f.Close())
+								require.NoError(t, err)
 							}
 							r, err := getSimpleRunner(t, "/script",
 								fmt.Sprintf(
@@ -376,7 +409,7 @@ func TestFileConsole(t *testing.T) {
 							require.NoError(t, err)
 
 							vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
-							logger := extractLogger(vu.(*ActiveVU).Console.logger)
+							logger := extractLogger(vu)
 
 							logger.Level = logrus.DebugLevel
 							hook := logtest.NewLocal(logger)
@@ -385,7 +418,7 @@ func TestFileConsole(t *testing.T) {
 							require.NoError(t, err)
 
 							// Test if the file was created.
-							_, err = os.Stat(logFilename)
+							_, err = os.Stat(logFilename) //nolint:forbidigo // fix with https://github.com/grafana/k6/issues/2565
 							require.NoError(t, err)
 
 							entry := hook.LastEntry()
@@ -404,7 +437,7 @@ func TestFileConsole(t *testing.T) {
 							entryStr, err := entry.String()
 							require.NoError(t, err)
 
-							f, err = os.Open(logFilename) //nolint:gosec
+							f, err = os.Open(logFilename) //nolint:forbidigo,gosec // fix with https://github.com/grafana/k6/issues/2565
 							require.NoError(t, err)
 
 							fileContent, err := io.ReadAll(f)

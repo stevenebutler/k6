@@ -1,13 +1,11 @@
+// Package log provides logging for the browser module.
 package log
 
 import (
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"regexp"
 	"runtime"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -26,7 +24,7 @@ type Logger struct {
 // be discarded and not logged anywhere.
 func NewNullLogger() *Logger {
 	log := logrus.New()
-	log.SetOutput(ioutil.Discard)
+	log.SetOutput(io.Discard)
 	return New(log, "")
 }
 
@@ -98,9 +96,9 @@ func (l *Logger) Logf(level logrus.Level, category string, msg string, args ...a
 		return
 	}
 	fields := logrus.Fields{
-		"category":  category,
-		"elapsed":   fmt.Sprintf("%d ms", elapsed),
-		"goroutine": goRoutineID(),
+		"source":   "browser",
+		"category": category,
+		"elapsed":  fmt.Sprintf("%d ms", elapsed),
 	}
 	if l.iterID != "" && l.GetLevel() > logrus.InfoLevel {
 		fields["iteration_id"] = l.iterID
@@ -153,18 +151,6 @@ func (l *Logger) ReportCaller() {
 	l.SetReportCaller(true)
 }
 
-// ConsoleLogFormatterSerializer creates a new logger that will
-// correctly serialize RemoteObject instances.
-func (l *Logger) ConsoleLogFormatterSerializer() *Logger {
-	return &Logger{
-		Logger: &logrus.Logger{
-			Out:       l.Out,
-			Level:     l.Level,
-			Formatter: &consoleLogFormatter{l.Formatter},
-		},
-	}
-}
-
 // SetCategoryFilter enables filtering logs by the filter regex.
 func (l *Logger) SetCategoryFilter(filter string) (err error) {
 	if filter == "" {
@@ -174,36 +160,4 @@ func (l *Logger) SetCategoryFilter(filter string) (err error) {
 		return fmt.Errorf("invalid category filter %q: %w", filter, err)
 	}
 	return nil
-}
-
-func goRoutineID() int {
-	var buf [64]byte
-	n := runtime.Stack(buf[:], false)
-	idField := strings.Fields(strings.TrimPrefix(string(buf[:n]), "goroutine "))[0]
-	id, err := strconv.Atoi(idField)
-	if err != nil {
-		panic(fmt.Sprintf("internal error while getting goroutine ID: %v", err))
-	}
-	return id
-}
-
-type consoleLogFormatter struct {
-	logrus.Formatter
-}
-
-// Format assembles a message from marshalling elements in the "objects" field
-// to JSON separated by space, and deletes the field when done.
-func (f *consoleLogFormatter) Format(entry *logrus.Entry) ([]byte, error) {
-	if objects, ok := entry.Data["objects"].([]any); ok {
-		var msg []string
-		for _, obj := range objects {
-			// TODO: Log error?
-			if o, err := json.Marshal(obj); err == nil {
-				msg = append(msg, string(o))
-			}
-		}
-		entry.Message = strings.Join(msg, " ")
-		delete(entry.Data, "objects")
-	}
-	return f.Formatter.Format(entry)
 }

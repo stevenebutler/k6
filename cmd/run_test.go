@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"io/ioutil"
+	"os"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -118,7 +118,9 @@ func TestRunScriptErrorsAndAbort(t *testing.T) {
 		testFilename, name   string
 		expErr, expLogOutput string
 		expExitCode          exitcodes.ExitCode
+		configFilename       string
 		extraArgs            []string
+		envVars              map[string]string
 	}{
 		{
 			testFilename: "abort.js",
@@ -145,6 +147,41 @@ func TestRunScriptErrorsAndAbort(t *testing.T) {
 			testFilename: "initerr.js",
 			expErr:       "ReferenceError: someUndefinedVar is not defined",
 			expExitCode:  exitcodes.ScriptException,
+		},
+		{
+			testFilename: "invalidconfig/invalid_option.js",
+			name:         "run should fail with exit status 104 if an invalid option value exists",
+			expErr:       "this is an invalid type",
+			expExitCode:  exitcodes.InvalidConfig,
+		},
+		{
+			testFilename: "invalidconfig/option_env.js",
+			name:         "run should fail with exit status 104 if an invalid option is set through env variable",
+			expErr:       "envconfig.Process",
+			expExitCode:  exitcodes.InvalidConfig,
+			envVars: map[string]string{
+				"K6_DURATION": "fails",
+			},
+		},
+		{
+			testFilename: "invalidconfig/option_env.js",
+			name:         "run should fail with exit status 104 if an invalid option is set through k6 variable",
+			expErr:       "invalid duration",
+			expExitCode:  exitcodes.InvalidConfig,
+			extraArgs:    []string{"--env", "DURATION=fails"},
+		},
+		{
+			testFilename:   "invalidconfig/option_env.js",
+			name:           "run should fail with exit status 104 if an invalid option is set in a config file",
+			expErr:         "invalid duration",
+			expExitCode:    exitcodes.InvalidConfig,
+			configFilename: "invalidconfig/invalid.json",
+		},
+		{
+			testFilename: "invalidconfig/invalid_scenario.js",
+			name:         "run should fail with exit status 104 if an invalid scenario exists",
+			expErr:       "specified executor type",
+			expExitCode:  exitcodes.InvalidConfig,
 		},
 		{
 			testFilename: "thresholds/non_existing_metric.js",
@@ -196,12 +233,22 @@ func TestRunScriptErrorsAndAbort(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			testScript, err := ioutil.ReadFile(path.Join("testdata", tc.testFilename))
+			testScript, err := os.ReadFile(path.Join("testdata", tc.testFilename)) //nolint:forbidigo
 			require.NoError(t, err)
 
 			ts := tests.NewGlobalTestState(t)
 			require.NoError(t, fsext.WriteFile(ts.FS, filepath.Join(ts.Cwd, tc.testFilename), testScript, 0o644))
 			ts.CmdArgs = append([]string{"k6", "run", tc.testFilename}, tc.extraArgs...)
+
+			if tc.configFilename != "" {
+				configFile, err := os.ReadFile(path.Join("testdata", tc.configFilename)) //nolint:forbidigo
+				require.NoError(t, err)
+				require.NoError(t, fsext.WriteFile(ts.FS, filepath.Join(ts.Cwd, tc.configFilename), configFile, 0o644))
+				ts.Flags.ConfigFilePath = path.Join(ts.Cwd, tc.configFilename)
+			}
+			if tc.envVars != nil {
+				ts.Env = tc.envVars
+			}
 
 			ts.ExpectedExitCode = int(tc.expExitCode)
 			newRootCommand(ts.GlobalState).execute()
@@ -251,7 +298,7 @@ func TestInvalidOptionsThresholdErrExitCode(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			testScript, err := ioutil.ReadFile(path.Join("testdata", tc.testFilename))
+			testScript, err := os.ReadFile(path.Join("testdata", tc.testFilename)) //nolint:forbidigo
 			require.NoError(t, err)
 
 			ts := tests.NewGlobalTestState(t)
@@ -301,7 +348,7 @@ func TestThresholdsRuntimeBehavior(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			testScript, err := ioutil.ReadFile(path.Join("testdata", tc.testFilename))
+			testScript, err := os.ReadFile(path.Join("testdata", tc.testFilename)) //nolint:forbidigo
 			require.NoError(t, err)
 
 			ts := tests.NewGlobalTestState(t)

@@ -2,12 +2,15 @@ package influxdb
 
 import (
 	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 
 	client "github.com/influxdata/influxdb1-client/v2"
 	"gopkg.in/guregu/null.v3"
 )
 
+// MakeClient returns a new InfluxDB client based on the given Config.
 func MakeClient(conf Config) (client.Client, error) {
 	if strings.HasPrefix(conf.Addr.String, "udp://") {
 		return client.NewUDPClient(client.UDPConfig{
@@ -18,15 +21,24 @@ func MakeClient(conf Config) (client.Client, error) {
 	if conf.Addr.String == "" {
 		conf.Addr = null.StringFrom("http://localhost:8086")
 	}
-	return client.NewHTTPClient(client.HTTPConfig{
+	clientHTTPConfig := client.HTTPConfig{
 		Addr:               conf.Addr.String,
 		Username:           conf.Username.String,
 		Password:           conf.Password.String,
 		UserAgent:          "k6",
 		InsecureSkipVerify: conf.Insecure.Bool,
-	})
+	}
+	if conf.Proxy.Valid {
+		parsedProxyURL, err := url.Parse(conf.Proxy.String)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse the http proxy URL: %w", err)
+		}
+		clientHTTPConfig.Proxy = http.ProxyURL(parsedProxyURL)
+	}
+	return client.NewHTTPClient(clientHTTPConfig)
 }
 
+// MakeBatchConfig returns a new InfluxDB BatchPointsConfig based on the given
 func MakeBatchConfig(conf Config) client.BatchPointsConfig {
 	if !conf.DB.Valid || conf.DB.String == "" {
 		conf.DB = null.StringFrom("k6")

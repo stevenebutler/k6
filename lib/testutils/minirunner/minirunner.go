@@ -1,3 +1,5 @@
+// Package minirunner provides a mock implementation of the lib.Runner
+// We use it in tests
 package minirunner
 
 import (
@@ -26,7 +28,6 @@ type MiniRunner struct {
 
 	SetupData []byte
 
-	Group        *lib.Group
 	Options      lib.Options
 	PreInitState *lib.TestPreInitState
 
@@ -84,17 +85,9 @@ func (r MiniRunner) Teardown(ctx context.Context, out chan<- metrics.SampleConta
 	return nil
 }
 
-// GetDefaultGroup returns the default group.
-func (r MiniRunner) GetDefaultGroup() *lib.Group {
-	if r.Group == nil {
-		r.Group = &lib.Group{}
-	}
-	return r.Group
-}
-
 // IsExecutable satisfies lib.Runner, but is mocked for MiniRunner since
 // it doesn't deal with JS.
-func (r MiniRunner) IsExecutable(name string) bool {
+func (r MiniRunner) IsExecutable(_ string) bool {
 	return true
 }
 
@@ -119,7 +112,7 @@ func (r *MiniRunner) HandleSummary(ctx context.Context, s *lib.Summary) (map[str
 	if r.HandleSummaryFn != nil {
 		return r.HandleSummaryFn(ctx, s)
 	}
-	return nil, nil
+	return nil, nil //nolint:nilnil
 }
 
 // VU is a mock VU, spawned by a MiniRunner.

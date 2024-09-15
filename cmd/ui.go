@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/fatih/color"
+	"github.com/grafana/xk6-dashboard/dashboard"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/term"
 
@@ -49,7 +50,7 @@ func getColor(noColor bool, attributes ...color.Attribute) *color.Color {
 }
 
 func getBanner(noColor bool) string {
-	c := getColor(noColor, color.FgCyan)
+	c := getColor(noColor, color.FgYellow)
 	return c.Sprint(consts.Banner())
 }
 
@@ -103,8 +104,8 @@ func printExecutionDescription(
 	valueColor := getColor(noColor, color.FgCyan)
 
 	buf := &strings.Builder{}
-	fmt.Fprintf(buf, "  execution: %s\n", valueColor.Sprint(execution))
-	fmt.Fprintf(buf, "     script: %s\n", valueColor.Sprint(filename))
+	fmt.Fprintf(buf, "     execution: %s\n", valueColor.Sprint(execution))
+	fmt.Fprintf(buf, "        script: %s\n", valueColor.Sprint(filename))
 
 	var outputDescriptions []string
 	switch {
@@ -113,17 +114,27 @@ func printExecutionDescription(
 	default:
 		for _, out := range outputs {
 			desc := out.Description()
-			if desc == engine.IngesterDescription {
-				if len(outputs) != 1 {
-					continue
-				}
-				desc = "-"
+			switch desc {
+			case engine.IngesterDescription, lib.GroupSummaryDescription:
+				continue
+			}
+			if strings.HasPrefix(desc, dashboard.OutputName) {
+				fmt.Fprintf(buf, " web dashboard:%s\n", valueColor.Sprint(strings.TrimPrefix(desc, dashboard.OutputName)))
+
+				continue
 			}
 			outputDescriptions = append(outputDescriptions, desc)
 		}
+		if len(outputDescriptions) == 0 {
+			outputDescriptions = append(outputDescriptions, "-")
+		}
 	}
 
-	fmt.Fprintf(buf, "     output: %s\n", valueColor.Sprint(strings.Join(outputDescriptions, ", ")))
+	fmt.Fprintf(buf, "        output: %s\n", valueColor.Sprint(strings.Join(outputDescriptions, ", ")))
+	if gs.Flags.ProfilingEnabled && gs.Flags.Address != "" {
+		fmt.Fprintf(buf, "     profiling: %s\n", valueColor.Sprintf("http://%s/debug/pprof/", gs.Flags.Address))
+	}
+
 	fmt.Fprintf(buf, "\n")
 
 	maxDuration, _ := lib.GetEndOffset(execPlan)
@@ -134,13 +145,13 @@ func printExecutionDescription(
 		scenarioDesc = fmt.Sprintf("%d scenarios", len(executorConfigs))
 	}
 
-	fmt.Fprintf(buf, "  scenarios: %s\n", valueColor.Sprintf(
+	fmt.Fprintf(buf, "     scenarios: %s\n", valueColor.Sprintf(
 		"(%.2f%%) %s, %d max VUs, %s max duration (incl. graceful stop):",
 		conf.ExecutionSegment.FloatLength()*100, scenarioDesc,
 		lib.GetMaxPossibleVUs(execPlan), maxDuration.Round(100*time.Millisecond)),
 	)
 	for _, ec := range executorConfigs {
-		fmt.Fprintf(buf, "           * %s: %s\n",
+		fmt.Fprintf(buf, "              * %s: %s\n",
 			ec.GetName(), ec.GetDescription(et))
 	}
 	fmt.Fprintf(buf, "\n")
@@ -252,13 +263,13 @@ func showProgress(ctx context.Context, gs *state.GlobalState, pbs []*pb.Progress
 		return
 	}
 
-	var errTermGetSize bool
+	var terminalSizeUnknown bool
 	termWidth := defaultTermWidth
 	if gs.Stdout.IsTTY {
-		tw, _, err := term.GetSize(int(gs.Stdout.RawOut.Fd()))
+		tw, _, err := term.GetSize(gs.Stdout.RawOutFd)
 		if !(tw > 0) || err != nil {
-			errTermGetSize = true
-			logger.WithError(err).Warn("error getting terminal size")
+			terminalSizeUnknown = true
+			logger.WithError(err).Debug("can't get terminal size")
 		} else {
 			termWidth = tw
 		}
@@ -269,10 +280,10 @@ func showProgress(ctx context.Context, gs *state.GlobalState, pbs []*pb.Progress
 	var leftLen int64
 	for _, pb := range pbs {
 		l := pb.Left()
-		leftLen = lib.Max(int64(len(l)), leftLen)
+		leftLen = max(int64(len(l)), leftLen)
 	}
 	// Limit to maximum left text length
-	maxLeft := int(lib.Min(leftLen, maxLeftLength))
+	maxLeft := int(min(leftLen, maxLeftLength))
 
 	var progressBarsLastRenderLock sync.Mutex
 	var progressBarsLastRender []byte
@@ -310,7 +321,7 @@ func showProgress(ctx context.Context, gs *state.GlobalState, pbs []*pb.Progress
 	updateFreq := 1 * time.Second
 	var stdoutFD int
 	if gs.Stdout.IsTTY {
-		stdoutFD = int(gs.Stdout.RawOut.Fd())
+		stdoutFD = gs.Stdout.RawOutFd
 		updateFreq = 100 * time.Millisecond
 		gs.OutMutex.Lock()
 		gs.Stdout.PersistentText = printProgressBars
@@ -342,7 +353,7 @@ func showProgress(ctx context.Context, gs *state.GlobalState, pbs []*pb.Progress
 			gs.OutMutex.Unlock()
 			return
 		case <-winch:
-			if gs.Stdout.IsTTY && !errTermGetSize {
+			if gs.Stdout.IsTTY && !terminalSizeUnknown {
 				// More responsive progress bar resizing on platforms with SIGWINCH (*nix)
 				tw, _, err := term.GetSize(stdoutFD)
 				if tw > 0 && err == nil {
@@ -351,7 +362,7 @@ func showProgress(ctx context.Context, gs *state.GlobalState, pbs []*pb.Progress
 			}
 		case <-ticker.C:
 			// Default ticker-based progress bar resizing
-			if gs.Stdout.IsTTY && !errTermGetSize && winch == nil {
+			if gs.Stdout.IsTTY && !terminalSizeUnknown && winch == nil {
 				tw, _, err := term.GetSize(stdoutFD)
 				if tw > 0 && err == nil {
 					termWidth = tw

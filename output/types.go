@@ -13,6 +13,7 @@ import (
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/fsext"
 	"go.k6.io/k6/metrics"
+	"go.k6.io/k6/usage"
 )
 
 // Params contains all possible constructor parameters an output may need.
@@ -30,6 +31,7 @@ type Params struct {
 	ScriptOptions  lib.Options
 	RuntimeOptions lib.RuntimeOptions
 	ExecutionPlan  []lib.ExecutionStep
+	Usage          *usage.Usage
 }
 
 // TODO: make v2 with buffered channels?
@@ -64,6 +66,13 @@ type Output interface {
 type WithThresholds interface {
 	Output
 	SetThresholds(map[string]metrics.Thresholds)
+}
+
+// WithArchive is an output that can receive the archive object in order
+// to upload it to the cloud.
+type WithArchive interface {
+	Output
+	SetArchive(archive *lib.Archive)
 }
 
 // WithTestRunStop is an output that can stop the test run mid-way through,

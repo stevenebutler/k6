@@ -3,11 +3,17 @@ package expv2
 import (
 	"math"
 	"math/bits"
+	"sort"
 
 	"go.k6.io/k6/output/cloud/expv2/pbcloud"
 )
 
 const (
+	// defaultMinimumResolution is the default resolution used by histogram.
+	// It allows to have a higher granularity compared to the basic 1.0 value,
+	// supporting floating points up to 3 digits.
+	defaultMinimumResolution = .001
+
 	// lowestTrackable represents the minimum value that the histogram tracks.
 	// Essentially, it excludes negative numbers.
 	// Most of metrics tracked by histograms are durations
@@ -16,12 +22,6 @@ const (
 	// In the future, we may expand and include them,
 	// probably after https://github.com/grafana/k6/issues/763.
 	lowestTrackable = 0
-
-	// highestTrackable represents the maximum
-	// value that the histogram is able to track with high accuracy (0.1% of error).
-	// It should be a high enough
-	// and rationale value for the k6 context; 2^30 = 1_073_741_824
-	highestTrackable = 1 << 30
 )
 
 // histogram represents a distribution
@@ -37,14 +37,9 @@ const (
 // The current version is: f(N = 25, m = 7) = 3200.
 type histogram struct {
 	// Buckets stores the counters for each bin of the histogram.
-	// It does not include the first and the last absolute bucket,
-	// because they contain exception cases
-	// and they requires to be tracked in a dedicated way.
-	//
-	// It is expected to start and end with a non-zero bucket,
-	// in this way we can avoid extra allocation for not significant buckets.
-	// All the zero buckets in between are preserved.
-	Buckets []uint32
+	// It does not include counters for the untrackable values,
+	// because they contain exception cases and require to be tracked in a dedicated way.
+	Buckets map[uint32]uint32
 
 	// ExtraLowBucket counts occurrences of observed values smaller
 	// than the minimum trackable value.
@@ -53,16 +48,6 @@ type histogram struct {
 	// ExtraLowBucket counts occurrences of observed values bigger
 	// than the maximum trackable value.
 	ExtraHighBucket uint32
-
-	// FirstNotZeroBucket represents the index of the first bucket
-	// with a significant counter in the Buckets slice (a not zero value).
-	// In this way, all the buckets before can be omitted.
-	FirstNotZeroBucket uint32
-
-	// LastNotZeroBucket represents the index of the last bucket
-	// with a significant counter in the Buckets slice (a not zero value).
-	// In this way, all the buckets after can be omitted.
-	LastNotZeroBucket uint32
 
 	// Max is the absolute maximum observed value.
 	Max float64
@@ -75,123 +60,97 @@ type histogram struct {
 
 	// Count is counts the amount of observed values.
 	Count uint32
+
+	// MinimumResolution represents resolution used by Histogram.
+	// In principle, it is a multiplier factor for the tracked values.
+	MinimumResolution float64
+}
+
+func newHistogram() *histogram {
+	return &histogram{
+		MinimumResolution: defaultMinimumResolution,
+		Buckets:           make(map[uint32]uint32),
+		Max:               -math.MaxFloat64,
+		Min:               math.MaxFloat64,
+	}
 }
 
 // addToBucket increments the counter of the bucket of the provided value.
 // If the value is lower or higher than the trackable limits
 // then it is counted into specific buckets. All the stats are also updated accordingly.
 func (h *histogram) addToBucket(v float64) {
-	if h.Count == 0 {
-		h.Max, h.Min = v, v
-	} else {
-		if v > h.Max {
-			h.Max = v
-		}
-		if v < h.Min {
-			h.Min = v
-		}
+	if v > h.Max {
+		h.Max = v
+	}
+	if v < h.Min {
+		h.Min = v
 	}
 
 	h.Count++
 	h.Sum += v
 
-	if v > highestTrackable {
-		h.ExtraHighBucket++
-		return
-	}
+	v /= h.MinimumResolution
+
 	if v < lowestTrackable {
 		h.ExtraLowBucket++
 		return
 	}
-
-	index := resolveBucketIndex(v)
-
-	// they grow the current Buckets slice if there isn't enough capacity.
-	//
-	// An example with growRight:
-	// With Buckets [4, 1] and index equals to 5
-	// then we expect a slice like [4,1,0,0,0,0]
-	// then the counter at 5th position will be incremented
-	// generating the final slice [4,1,0,0,0,1]
-	switch {
-	case len(h.Buckets) == 0:
-		h.init(index)
-	case index < h.FirstNotZeroBucket:
-		h.prependBuckets(index)
-	case index > h.LastNotZeroBucket:
-		h.appendBuckets(index)
-	default:
-		h.Buckets[index-h.FirstNotZeroBucket]++
-	}
-}
-
-func (h *histogram) init(index uint32) {
-	h.FirstNotZeroBucket = index
-	h.LastNotZeroBucket = index
-	h.Buckets = make([]uint32, 1, 32)
-	h.Buckets[0] = 1
-}
-
-// prependBuckets expands the buckets slice with zeros up to the required index,
-// then it increments the required bucket.
-func (h *histogram) prependBuckets(index uint32) {
-	if h.FirstNotZeroBucket <= index {
-		panic("buckets is already contains the requested index")
+	if v > math.MaxInt64 {
+		h.ExtraHighBucket++
+		return
 	}
 
-	newLen := (h.FirstNotZeroBucket - index) + uint32(len(h.Buckets))
-
-	// TODO: we may consider to swap by sub-groups
-	// e.g  [4, 1] => [4, 1, 0, 0] => [0, 0, 4, 1]
-	// It requires a benchmark if it is better than just copy it.
-
-	newBuckets := make([]uint32, newLen)
-	copy(newBuckets[h.FirstNotZeroBucket-index:], h.Buckets)
-	h.Buckets = newBuckets
-
-	// Update the stats
-	h.Buckets[0] = 1
-	h.FirstNotZeroBucket = index
-}
-
-// appendBuckets expands the buckets slice with zeros buckets till the required index,
-// then it increments the required bucket.
-// If the slice has enough capacity then it reuses it without allocate.
-func (h *histogram) appendBuckets(index uint32) {
-	if h.LastNotZeroBucket >= index {
-		panic("buckets is already bigger than requested index")
-	}
-
-	newLen := index - h.FirstNotZeroBucket + 1
-
-	if uint32(cap(h.Buckets)) > newLen {
-		// See https://go.dev/ref/spec#Slice_expressions
-		// "For slices, the upper index bound is
-		// the slice capacity cap(a) rather than the length"
-		h.Buckets = h.Buckets[:newLen]
-	} else {
-		newBuckets := make([]uint32, newLen)
-		copy(newBuckets, h.Buckets)
-		h.Buckets = newBuckets
-	}
-
-	// Update the stats
-	h.Buckets[len(h.Buckets)-1] = 1
-	h.LastNotZeroBucket = index
+	h.Buckets[resolveBucketIndex(v)]++
 }
 
 // histogramAsProto converts the histogram into the equivalent Protobuf version.
 func histogramAsProto(h *histogram, time int64) *pbcloud.TrendHdrValue {
+	var (
+		indexes  []uint32
+		counters []uint32
+		spans    []*pbcloud.BucketSpan
+	)
+
+	// allocate only if at least one item is available, in the case of only
+	// untrackable values, then Indexes and Buckets are expected to be empty.
+	if len(h.Buckets) > 0 {
+		indexes = make([]uint32, 0, len(h.Buckets))
+		for index := range h.Buckets {
+			indexes = append(indexes, index)
+		}
+		sort.Slice(indexes, func(i, j int) bool {
+			return indexes[i] < indexes[j]
+		})
+
+		// init the counters
+		counters = make([]uint32, 1, len(h.Buckets))
+		counters[0] = h.Buckets[indexes[0]]
+		// open the first span
+		spans = append(spans, &pbcloud.BucketSpan{Offset: indexes[0], Length: 1})
+	}
+
+	for i := 1; i < len(indexes); i++ {
+		counters = append(counters, h.Buckets[indexes[i]])
+
+		// if the current and the previous indexes are not consecutive
+		// consider as closed the current on-going span and start a new one.
+		if zerosBetween := indexes[i] - indexes[i-1] - 1; zerosBetween > 0 {
+			spans = append(spans, &pbcloud.BucketSpan{Offset: zerosBetween, Length: 1})
+			continue
+		}
+
+		spans[len(spans)-1].Length++
+	}
+
 	hval := &pbcloud.TrendHdrValue{
-		Time:              timestampAsProto(time),
-		MinResolution:     1.0,
-		SignificantDigits: 2,
-		LowerCounterIndex: h.FirstNotZeroBucket,
-		MinValue:          h.Min,
-		MaxValue:          h.Max,
-		Sum:               h.Sum,
-		Count:             h.Count,
-		Counters:          h.Buckets,
+		Time:          timestampAsProto(time),
+		MinValue:      h.Min,
+		MaxValue:      h.Max,
+		Sum:           h.Sum,
+		Count:         h.Count,
+		Counters:      counters,
+		Spans:         spans,
+		MinResolution: h.MinimumResolution,
 	}
 	if h.ExtraLowBucket > 0 {
 		hval.ExtraLowValuesCounter = &h.ExtraLowBucket
@@ -212,7 +171,7 @@ func resolveBucketIndex(val float64) uint32 {
 	// We upscale to the next integer to ensure that each sample falls
 	// within a specific bucket, even when the value is fractional.
 	// This avoids under-representing the distribution in the histogram.
-	upscaled := uint32(math.Ceil(val))
+	upscaled := uint64(math.Ceil(val))
 
 	// In histograms, bucket boundaries are usually defined as multiples of powers of 2,
 	// allowing for efficient computation of bucket indexes.
@@ -229,11 +188,11 @@ func resolveBucketIndex(val float64) uint32 {
 	//     2^10 = 1024 ~ 1000 = 10^3
 	// f(x) = 3*x + 1 - empiric formula that works for us
 	// since f(2)=7 and f(3)=10
-	const k = uint32(7)
+	const k = uint64(7)
 
 	// 256 = 1 << (k+1)
 	if upscaled < 256 {
-		return upscaled
+		return uint32(upscaled)
 	}
 
 	// `nkdiff` helps us find the right bucket for `upscaled`. It does so by determining the
@@ -253,10 +212,15 @@ func resolveBucketIndex(val float64) uint32 {
 	//          = (n-k+1)<<k + u>>(n-k) - (1<<k) =
 	//          = (n-k)<<k + u>>(n-k)
 	//
-	nkdiff := uint32(bits.Len32(upscaled>>k) - 1) // msb index
-	return (nkdiff << k) + (upscaled >> nkdiff)
+	nkdiff := uint64(bits.Len64(upscaled>>k)) - 1 // msb index
+
+	// We cast safely downscaling because we don't expect we may hit the uint32 limit
+	// with the bucket index. The bucket represented from the index as MaxUint32
+	// would be a very huge number bigger than the trackable limits.
+	return uint32((nkdiff << k) + (upscaled >> nkdiff))
 }
 
+// Add implements the metricValue interface.
 func (h *histogram) Add(v float64) {
 	h.addToBucket(v)
 }

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -14,8 +14,8 @@ import (
 	"go.k6.io/k6/js/modulestest"
 )
 
-func makeRuntime(t *testing.T) *goja.Runtime {
-	rt := goja.New()
+func makeRuntime(t *testing.T) *sobek.Runtime {
+	rt := sobek.New()
 	rt.SetFieldNameMapper(common.FieldNameMapper{})
 	m, ok := New().NewModuleInstance(
 		&modulestest.VU{
@@ -130,12 +130,17 @@ EUEm/VHUnElNquzGyBA50TCfpv6NHPaTvOoB45yQbZ/YB4LO+CsT9eIMDZ4tcU9Z
 }
 
 func TestParse(t *testing.T) {
+	t.Parallel()
+
 	if testing.Short() {
 		return
 	}
-	rt := makeRuntime(t)
 
 	t.Run("DecodeFailure", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(`
 		x509.parse("bad-certificate");`)
 		assert.Contains(
@@ -143,6 +148,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("ParseFailure", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		x509.parse(pem);`, material.publicKey))
@@ -155,6 +164,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("SignatureAlgorithm", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -166,6 +179,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("Subject", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -176,6 +193,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("SubjectCommonName", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -187,6 +208,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("SubjectCountry", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -198,6 +223,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("SubjectPostalCode", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -209,6 +238,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("SubjectProvince", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -220,6 +253,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("SubjectLocality", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -231,6 +268,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("SubjectStreetAddress", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -242,6 +283,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("SubjectOrganization", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -253,6 +298,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("SubjectOrganizationalUnit", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -271,6 +320,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("SubjectNames", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -300,6 +353,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("Issuer", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -310,6 +367,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("IssuerCommonName", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -321,6 +382,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("IssuerCountry", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -332,6 +397,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("IssuerProvince", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -343,6 +412,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("IssuerLocality", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -354,6 +427,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("IssuerOrganization", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -365,6 +442,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("IssuerNames", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -394,6 +475,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("NotBefore", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -405,6 +490,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("NotAfter", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -416,6 +505,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("AltNames", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -437,6 +530,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("FingerPrint", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -452,6 +549,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("PublicKey", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -462,6 +563,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("RSAPublicKey", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -472,7 +577,7 @@ func TestParse(t *testing.T) {
 			value.algorithm === "RSA" &&
 			typeof value.key === "object" &&
 			typeof value.key.e === "number" &&
-			typeof value.key.n === "object"
+			typeof value.key.n === "bigint"
 		)) {
 			throw new Error("Bad RSA public key");
 		}`, material.rsaCertificate))
@@ -480,6 +585,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("RSAPublicKeyExponent", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -491,37 +600,26 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("RSAPublicKeyModulus", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
-		var value = cert.publicKey ? cert.publicKey.key.n.bytes() : null;
-		var expected = [
-			223, 249, 234, 71, 180, 36, 28, 62, 84, 141, 177, 118, 53, 2, 175,
-			45, 167, 89, 155, 216, 103, 86, 32, 216, 42, 92, 84, 125, 183, 102,
-			217, 40, 255, 129, 38, 203, 175, 98, 209, 147, 151, 106, 250, 12,
-			123, 236, 135, 45, 80, 80, 76, 253, 148, 141, 13, 36, 76, 47, 182,
-			58, 100, 153, 114, 13, 141, 96, 12, 109, 126, 74, 68, 119, 88, 15,
-			52, 107, 80, 117, 190, 163, 230, 120, 26, 44, 139, 245, 222, 188,
-			210, 237, 123, 83, 91, 98, 160, 218, 229, 244, 128, 31, 24, 139,
-			125, 25, 184, 108, 180, 23, 149, 136, 47, 140, 168, 51, 159, 35,
-			65, 150, 7, 51, 134, 138, 188, 225, 105, 92, 9, 91, 72, 133, 70,
-			195, 131, 105, 184, 191, 198, 177, 130, 191, 70, 6, 37, 159, 255,
-			244, 109, 238, 128, 138, 0, 201, 41, 87, 67, 87, 165, 118, 4, 253,
-			209, 31, 177, 1, 1, 116, 64, 14, 17, 19, 217, 6, 117, 75, 24, 174,
-			236, 129, 134, 115, 245, 226, 203, 222, 17, 113, 197, 215, 138,
-			241, 99, 169, 68, 77, 243, 36, 116, 69, 143, 150, 60, 245, 75, 200,
-			30, 207, 141, 139, 136, 35, 125, 184, 255, 174, 26, 6, 148, 56,
-			253, 124, 249, 158, 249, 117, 3, 126, 124, 89, 27, 96, 209, 0, 207,
-			152, 233, 166, 81, 7, 253, 155, 165, 96, 29, 72, 28, 172, 24, 104,
-			70, 229, 201, 107, 200, 169, 220, 35
-		]
-		if (value.join(":") !== expected.join(":")) {
-			throw new Error("Bad RSA public key modulus: " + value.join(":"));
+		var value = cert.publicKey ? cert.publicKey.key.n.toString(16) : null;
+		var expected = "dff9ea47b4241c3e548db1763502af2da7599bd8675620d82a5c547db766d928ff8126cbaf62d193976afa0c7bec872d50504cfd948d0d244c2fb63a6499720d8d600c6d7e4a4477580f346b5075bea3e6781a2c8bf5debcd2ed7b535b62a0dae5f4801f188b7d19b86cb41795882f8ca8339f2341960733868abce1695c095b488546c38369b8bfc6b182bf4606259ffff46dee808a00c929574357a57604fdd11fb1010174400e1113d906754b18aeec818673f5e2cbde1171c5d78af163a9444df32474458f963cf54bc81ecf8d8b88237db8ffae1a069438fd7cf99ef975037e7c591b60d100cf98e9a65107fd9ba5601d481cac186846e5c96bc8a9dc23";
+		if (value !== expected) {
+			throw new Error("Bad RSA public key modulus: " + value);
 		}`, material.rsaCertificate))
 		assert.NoError(t, err)
 	})
 
 	t.Run("DSAPublicKey", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -531,7 +629,7 @@ func TestParse(t *testing.T) {
 			typeof value === "object" &&
 			value.algorithm === "DSA" &&
 			typeof value.key.parameters === "object" &&
-			typeof value.key.y === "object"
+			typeof value.key.y === "bigint"
 		)) {
 			throw new Error("Bad DSA public key");
 		}`, material.dsaCertificate))
@@ -539,6 +637,10 @@ func TestParse(t *testing.T) {
 	})
 
 	t.Run("ECDSAPublicKey", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var cert = x509.parse(pem);
@@ -548,8 +650,8 @@ func TestParse(t *testing.T) {
 			typeof value === "object" &&
 			value.algorithm === "ECDSA" &&
 			typeof value.key.curve === "object" &&
-			typeof value.key.x === "object" &&
-			typeof value.key.y === "object"
+			typeof value.key.x === "bigint" &&
+			typeof value.key.y === "bigint"
 		)) {
 			throw new Error("Bad ECDSA public key");
 		}`, material.ecdsaCertificate))
@@ -558,18 +660,27 @@ func TestParse(t *testing.T) {
 }
 
 func TestGetAltNames(t *testing.T) {
+	t.Parallel()
+
 	if testing.Short() {
 		return
 	}
-	rt := makeRuntime(t)
 
 	t.Run("Failure", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(`
 		x509.getAltNames("bad-certificate");`)
 		assert.Error(t, err)
 	})
 
 	t.Run("Success", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var altNames = x509.getAltNames(pem);
@@ -592,18 +703,27 @@ func TestGetAltNames(t *testing.T) {
 }
 
 func TestGetIssuer(t *testing.T) {
+	t.Parallel()
+
 	if testing.Short() {
 		return
 	}
-	rt := makeRuntime(t)
 
 	t.Run("Failure", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(`
 		x509.getIssuer("bad-certificate");`)
 		assert.Error(t, err)
 	})
 
 	t.Run("Success", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var issuer = x509.getIssuer(pem);
@@ -624,18 +744,27 @@ func TestGetIssuer(t *testing.T) {
 }
 
 func TestGetSubject(t *testing.T) {
+	t.Parallel()
+
 	if testing.Short() {
 		return
 	}
-	rt := makeRuntime(t)
 
 	t.Run("Failure", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(`
 		x509.getSubject("bad-certificate");`)
 		assert.Error(t, err)
 	})
 
 	t.Run("Success", func(t *testing.T) {
+		t.Parallel()
+
+		rt := makeRuntime(t)
+
 		_, err := rt.RunString(fmt.Sprintf(`
 		var pem = %q;
 		var subject = x509.getSubject(pem);
@@ -663,27 +792,37 @@ func TestGetSubject(t *testing.T) {
 }
 
 func TestSignatureAlgorithm(t *testing.T) {
+	t.Parallel()
+
 	t.Run("Known", func(t *testing.T) {
+		t.Parallel()
+
 		result := signatureAlgorithm(gox509.MD5WithRSA)
 		assert.Equal(t, "MD5-RSA", result)
 	})
 
 	t.Run("Unknown", func(t *testing.T) {
+		t.Parallel()
+
 		result := signatureAlgorithm(gox509.UnknownSignatureAlgorithm)
 		assert.Equal(t, "UnknownSignatureAlgorithm", result)
 	})
 }
 
 func TestMakePublicKey(t *testing.T) {
+	t.Parallel()
+
 	t.Run("Unsupported", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := makePublicKey(nil)
 		assert.EqualError(t, err, "unsupported public key algorithm")
 	})
 }
 
-func TestMakeCertificate(t *testing.T) {
-	t.Run("UnsupportedKey", func(t *testing.T) {
-		_, err := makeCertificate(&gox509.Certificate{})
-		assert.EqualError(t, err, "unsupported public key algorithm")
-	})
+func TestMakeCertificateUnsupportedKey(t *testing.T) {
+	t.Parallel()
+
+	_, err := makeCertificate(&gox509.Certificate{})
+	assert.EqualError(t, err, "unsupported public key algorithm")
 }

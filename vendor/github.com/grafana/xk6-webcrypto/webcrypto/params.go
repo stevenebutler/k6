@@ -10,63 +10,12 @@ type From[Input, Output any] interface {
 	From(Input) (Output, error)
 }
 
-// AESKeyGenParams represents the object that should be passed as
-// the algorithm parameter into `SubtleCrypto.generateKey`, when generating
-// an AES key: that is, when the algorithm is identified as any
-// of AES-CBC, AES-CTR, AES-GCM, or AES-KW.
-type AESKeyGenParams struct {
-	// Name should be set to `AES-CBC`, `AES-CTR`, `AES-GCM`, or `AES-KW`.
-	Name AlgorithmIdentifier
-
-	// Length holds (a Number) the length of the key, in bits.
-	Length int
-}
-
 // AESKwParams represents the object that should be passed as the algorithm parameter
 // into `SubtleCrypto.Encrypt`, `SubtleCrypto.Decrypt`, `SubtleCrypto.WrapKey`, or
 // `SubtleCrypto.UnwrapKey`, when using the AES-KW algorithm.
 type AESKwParams struct {
 	// Name should be set to AlgorithmKindAesKw.
 	Name AlgorithmIdentifier
-}
-
-// The ECDSAParams represents the object that should be passed as the algorithm
-// parameter into `SubtleCrypto.Sign` or `SubtleCrypto.Verify“ when using the
-// ECDSA algorithm.
-type ECDSAParams struct {
-	// Name should be set to AlgorithmKindEcdsa.
-	Name AlgorithmIdentifier
-
-	// Hash identifies the name of the digest algorithm to use.
-	// You can use any of the following:
-	//   * [Sha256]
-	//   * [Sha384]
-	//   * [Sha512]
-	Hash AlgorithmIdentifier
-}
-
-// ECKeyGenParams  represents the object that should be passed as the algorithm
-// parameter into `SubtleCrypto.GenerateKey`, when generating any
-// elliptic-curve-based key pair: that is, when the algorithm is identified
-// as either of AlgorithmKindEcdsa or AlgorithmKindEcdh.
-type ECKeyGenParams struct {
-	// Name should be set to AlgorithmKindEcdsa or AlgorithmKindEcdh.
-	Name AlgorithmIdentifier
-
-	// NamedCurve holds (a String) the name of the curve to use.
-	// You can use any of the following: CurveKindP256, CurveKindP384, or CurveKindP521.
-	NamedCurve EllipticCurveKind
-}
-
-// ECKeyImportParams represents the object that should be passed as the algorithm parameter
-// into `SubtleCrypto.ImportKey` or `SubtleCrypto.UnwrapKey`, when generating any elliptic-curve-based
-// key pair: that is, when the algorithm is identified as either of ECDSA or ECDH.
-type ECKeyImportParams struct {
-	// Name should be set to AlgorithmKindEcdsa or AlgorithmKindEcdh.
-	Name AlgorithmIdentifier
-
-	// NamedCurve holds (a String) the name of the elliptic curve to use.
-	NamedCurve EllipticCurveKind
 }
 
 // HKDFParams represents the object that should be passed as the algorithm parameter
@@ -105,17 +54,6 @@ type HKDFParams struct {
 type HMACSignatureParams struct {
 	// Name should be set to AlgorithmKindHmac.
 	Name AlgorithmIdentifier
-}
-
-// HMACImportParams represents the object that should be passed as the
-// algorithm parameter into `SubtleCrypto.ImportKey` or `SubtleCrypto.UnwrapKey`, when
-// generating a key for the HMAC algorithm.
-type HMACImportParams struct {
-	// Name should be set to AlgorithmKindHmac.
-	Name AlgorithmIdentifier
-
-	// Hash represents the name of the digest function to use.
-	Hash AlgorithmIdentifier
 }
 
 // PBKDF2Params represents the object that should be passed as the algorithm
@@ -211,7 +149,7 @@ type RSAPssParams struct {
 
 	// SaltLength holds (a Number) the length of the random salt to use, in bytes.
 	// RFC 3447 says that "typical salt lengths" are either 0 or the length of the output
-	// of the digest algorithm selected whe this key was generated. For instance,
+	// of the digest algorithm selected when this key was generated. For instance,
 	// when using the SHA256 digest algorithm, the salt length could be 32.
 	SaltLength int
 }
