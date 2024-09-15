@@ -243,6 +243,6 @@ type SharedArrayBuffer struct {
 }
 
 // Wrap a SharedArray buffer with a provided JS runtime
-func (sab SharedArrayBuffer) Wrap(runtime *goja.Runtime) goja.ArrayBuffer {
+func (sab SharedArrayBuffer) Wrap(runtime *sobek.Runtime) sobek.ArrayBuffer {
 	return runtime.NewArrayBuffer(sab.arr)
 }
