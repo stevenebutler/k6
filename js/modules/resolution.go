@@ -297,3 +297,8 @@ func ExportGloballyModule(rt *sobek.Runtime, modSys *ModuleSystem, moduleName st
 		}
 	}
 }
+
+func (mr *ModuleResolver) GetGoModule(name string) (interface{}, bool) {
+	mod, ok := mr.goModules[name]
+	return mod, ok
+}
