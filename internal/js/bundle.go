@@ -509,7 +509,7 @@ func (b *Bundle) setInitGlobals(rt *sobek.Runtime, vu *moduleVUImpl, modSys *mod
 			}
 		}
 
-		return openImpl(rt, b.filesystems["file"], pwd, filename, args...)
+		return openImpl(rt, b.ModuleResolver, b.filesystems["file"], pwd, filename, args...)
 	})
 	warnAboutModuleMixing := func(name string) {
 		warnFunc := rt.ToValue(func() error {
